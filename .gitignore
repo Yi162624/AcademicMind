@@ -24,3 +24,8 @@ Thumbs.db
 data/
 logs/
 *.log
+
+# 测试与覆盖率（evaluation 评估阶段用）
+.pytest_cache/
+.coverage
+htmlcov/

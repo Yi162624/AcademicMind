@@ -69,7 +69,7 @@ multimodal/   图片上传/提取 → Qwen2.5-VL-7B API（图表理解）
 memory/       SQLite：用户配置 + 阅读记录；Milvus Lite：向量记忆
 skills/       论文精读 skill（单篇论文八段式精读）
 evaluation/   RAGAS 质量评估
-schemas.py    数据契约（Outline/Evidence/Report/Suggestion 贯穿全程）
+core/schemas.py  数据契约（Outline/Evidence/Report/Suggestion 贯穿全程）
 
 模型调用层：
 - 所有文本 Agent 通过统一 HTTP Client 调用 DeepSeek-V3 API
@@ -331,10 +331,12 @@ Planner 拆解维度与分组 → N×Researcher 并行分析 → Writer 整合�
 
 ```
 AcademicMind/
-├── schemas.py          # 数据契约：全项目统一的数据结构定义
 ├── main.py             # 系统入口：任务分流 + LangGraph 状态机编排
-├── config.py           # 模型配置：API key、模型名称、上下文长度
-├── llm_client.py       # 统一模型调用层：DeepSeek API + Qwen-VL API 封装
+├── core/               # 核心基础设施（全项目共享，各模块都从这里 import）
+│   ├── __init__.py
+│   ├── config.py       # 模型配置：API key、模型名称、上下文长度
+│   ├── llm_client.py   # 统一模型调用层：DeepSeek API + Qwen-VL API 封装
+│   └── schemas.py      # 数据契约：全项目统一的数据结构定义
 ├── agent/              # 多Agent骨架（共用同一模型，通过 system prompt 区分角色）
 │   ├── planner.py      # 规划师Agent：拆解问题，制定研究大纲
 │   ├── researcher.py   # 研究员Agent：并行搜集图文资料
@@ -384,13 +386,13 @@ AcademicMind/
 
 ### 9.2 开发顺序（依赖关系）
 
-按依赖顺序推进：`config.py → llm_client.py → schemas.py → main.py → memory → skills → multimodal → frontend → evaluation`
+按依赖顺序推进：`core/config.py → core/llm_client.py → core/schemas.py → main.py → memory → skills → multimodal → frontend → evaluation`
 
 | 顺序 | 模块 | 职责说明 | 为什么排这个位置 |
 | :--- | :--- | :--- | :--- |
-| 1 | config.py | 统一配置：API key、模型名称、上下文长度、预算上限 | 所有模块依赖 |
-| 2 | llm_client.py | 统一模型调用层：封装 DeepSeek API 和 Qwen-VL API，对外暴露 `chat()` 和 `vision()` 接口 | Agent 和 skill 都依赖 |
-| 3 | schemas.py | 数据契约：全项目统一的数据结构定义 | 先定稿，后续模块按此对接 |
+| 1 | core/config.py | 统一配置：API key、模型名称、上下文长度、预算上限 | 所有模块依赖 |
+| 2 | core/llm_client.py | 统一模型调用层：封装 DeepSeek API 和 Qwen-VL API，对外暴露 `chat()` 和 `vision()` 接口 | Agent 和 skill 都依赖 |
+| 3 | core/schemas.py | 数据契约：全项目统一的数据结构定义 | 先定稿，后续模块按此对接 |
 | 4 | main.py | 系统入口：任务分流 + LangGraph 状态机编排（含 HUMAN_IN_LOOP） | 依赖 config、llm_client、schemas |
 | 5 | memory/ | SQLite：用户配置、阅读记录、任务日志；Milvus Lite：向量记忆 | 独立模块，先跑通数据存取 |
 | 6 | skills/ | 论文精读 skill：单篇论文智能解析 + 两阶段深读 + 八段式报告 | 独立能力模块，按 schemas 契约实现 |
