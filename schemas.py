@@ -1,0 +1,258 @@
+# 数据契约模块
+# 作用：全项目统一的数据结构定义，谁传数据都从这儿 import，保证格式一致
+# 位置：项目根目录，5个Agent、memory、multimodal、frontend、evaluation 都会引用它
+#
+# ── 两种任务模式 ──
+# "survey" 领域调研：用户提研究问题，输出图文领域报告
+# "paper"  论文分析：用户给论文列表，输出综述分析报告
+#
+# ── 结构清单（按流程顺序）──
+#   1 用户输入          → PaperSource（论文分析模式用）
+#   2 Planner 产出      → Outline（大纲，调研/分析两种模式字段分开）
+#   3 Researcher 产出   → Evidence（文本 TextEvidence + 图片 ImageItem）
+#   4 Verifier 产出     → VerifierResult（整体结论）+ Issue（问题清单）
+#   5 Writer 产出       → Report（报告，带上 outline 供验证员核对）
+#   6 Advisor 产出      → Suggestion（含 Paper 论文）
+#   7 单篇精读 skill    → DeepReadStage1（阶段1中间JSON）+ DeepReadReport（八段式报告）
+#   8 main.py 汇总      → FinalResult（report/suggestion/deep_read 三选场景，前端只认这一种格式）
+#   9 LangGraph 状态    → FlowState（状态机"黑板"，含 HUMAN_IN_LOOP 重试字段）
+#  10 记忆层            → SurveyRecord / PaperRecord（向量记忆）/ ReadingStatus / TaskRecord / UserConfig
+#
+# 为什么从前往后定：每个结构的字段由"下一棒要消费什么"决定，
+#                   先定产出、再定消费，字段才不会对不上。
+
+from __future__ import annotations  # 让注解延迟求值，避免类之间互相引用时报错
+
+from dataclasses import dataclass, field
+
+
+# ═══════════════════════════════════════
+# 任务模式常量：全项目统一用这两个值，别手打字符串
+# ═══════════════════════════════════════
+MODE_SURVEY = "survey"  # 领域调研模式
+MODE_PAPER = "paper"    # 论文分析模式
+
+
+# ═══════════════════════════════════════
+# 1 用户输入：论文分析模式用
+# ═══════════════════════════════════════
+@dataclass
+class PaperSource:
+    """用户输入的一篇论文（论文分析模式用）"""
+    title: str                  # 论文标题
+    link: str = ""              # 论文链接或PDF路径（arXiv链接/URL/本地PDF都行）
+    abstract: str = ""          # 摘要（可选，没有就让研究员去读原文）
+
+
+# ═══════════════════════════════════════
+# 2 Planner（规划师）产出：研究大纲
+# ═══════════════════════════════════════
+@dataclass
+class Outline:
+    """规划师产出：研究大纲（调研/分析两种模式共用，按模式用对应字段）"""
+    mode: str                                   # 任务模式：MODE_SURVEY / MODE_PAPER
+    question: str                               # 用户原始问题（两种模式都要）
+    # 调研模式（survey）用：
+    subtopics: list[str] = field(default_factory=list)          # 默认 3 个子主题（研究员分活用）
+    sections: list[str] = field(default_factory=list)           # 报告章节标题（写作者排版用）
+    image_requirements: list[str] = field(default_factory=list) # 每章需要的图片类型（研究员找图用）
+    # 论文分析模式（paper）用：
+    analysis_dimensions: list[str] = field(default_factory=list)     # 每篇论文要分析哪些方面（方法/实验/结论...）
+    paper_assignments: list[list[str]] = field(default_factory=list) # 论文怎么分组（每组一个研究员，存论文标题）
+
+
+# ═══════════════════════════════════════
+# 3 Researcher（研究员）产出：图文证据
+# ═══════════════════════════════════════
+@dataclass
+class TextEvidence:
+    """文本证据，带来源链接（验证员靠它查引用真假）"""
+    content: str                # 证据正文
+    source: str                 # 来源链接或出处
+    subtopic: str = ""          # 属于哪个子主题/分组
+
+
+@dataclass
+class ImageItem:
+    """图片素材，视觉工作记忆里存的就是它（主要调研模式用）"""
+    url: str                    # 图片地址
+    description: str            # 图片内容描述（视觉理解模块生成）
+    source: str                 # 图片来源（报告里要标引用）
+    subtopic: str = ""          # 属于哪个子主题
+    image_id: str = ""          # 图片唯一编号（报告里引用图片用）
+    embedding: list[float] = field(default_factory=list)  # BGE 向量（图片描述的向量），去重和检索用
+
+
+@dataclass
+class Evidence:
+    """一个研究员产出：某个子主题/论文分组的证据"""
+    subtopic: str                                   # 调研模式=子主题名；分析模式=论文分组名
+    texts: list[TextEvidence] = field(default_factory=list)  # 文本证据（分析模式下 source 即论文链接）
+    images: list[ImageItem] = field(default_factory=list)    # 图片素材（分析模式通常为空）
+
+
+# ═══════════════════════════════════════
+# 4 Verifier（验证员）产出：检查结论 + 问题清单
+# ═══════════════════════════════════════
+@dataclass
+class Issue:
+    """验证员发现的一个质量问题"""
+    level: str                  # 严重程度：error=必须改，warning=建议改
+    check_type: str             # 检查类型：fact=事实 / citation=引用 / image_text=图文一致 / fidelity=分析忠实度
+    message: str                # 问题描述
+    location: str = ""          # 问题位置（哪一章/哪张图）
+
+
+@dataclass
+class VerifierResult:
+    """验证员整体检查结论（Verifier Agent 的产出）"""
+    passed: bool                                        # 是否全部通过（没有 error 级问题就算过）
+    issues: list[Issue] = field(default_factory=list)   # 问题清单（通过则为空）
+    feedback: str = ""                                  # 综合修改意见（注入 Writer 重写 prompt 用）
+
+
+# ═══════════════════════════════════════
+# 5 Writer（写作者）产出：图文报告
+# ═══════════════════════════════════════
+@dataclass
+class Report:
+    """写作者产出：最终报告（调研=图文报告，分析=综述报告）"""
+    outline: Outline            # 生成报告用的大纲（验证员核对用）
+    html: str                   # 报告正文（HTML）
+
+
+# ═══════════════════════════════════════
+# 6 Advisor（建议Agent）产出：研究方向建议
+# ═══════════════════════════════════════
+@dataclass
+class Paper:
+    """一篇推荐的核心论文"""
+    title: str                  # 论文标题
+    reason: str                 # 推荐理由（一句话）
+    link: str = ""              # 论文链接
+
+
+@dataclass
+class Suggestion:
+    """建议Agent产出：调研模式=研究方向；分析模式=研究空白点"""
+    directions: list[str] = field(default_factory=list)   # 调研模式=3个方向；分析模式=研究空白点
+    papers: list[Paper] = field(default_factory=list)     # 5篇最值得精读的论文（分析模式可为空）
+    actions: list[str] = field(default_factory=list)      # 下一步行动清单
+
+
+# ═══════════════════════════════════════
+# 7 单篇精读 skill（paper_deep_read）产出
+# ═══════════════════════════════════════
+@dataclass
+class DeepReadStage1:
+    """单篇精读阶段1产出：从论文里提取的关键结构化信息（中间JSON，不直接给用户）"""
+    paper_info: dict[str, str]                              # 论文信息：标题/作者/机构/年份/链接
+    summary: str = ""                                       # 一句话总结
+    contributions: list[str] = field(default_factory=list)  # 核心贡献（2-3个创新点）
+    method: str = ""                                        # 方法拆解（技术路线/模型架构）
+    experiments: list[str] = field(default_factory=list)    # 实验分析（数据集/基准/结果/消融）
+    limitations: list[str] = field(default_factory=list)    # 局限性
+    figure_notes: list[str] = field(default_factory=list)   # 图表理解描述（Qwen-VL 生成的图表说明）
+
+
+@dataclass
+class DeepReadReport:
+    """单篇精读最终产出：八段式精读报告（阶段2基于阶段1的JSON生成）"""
+    paper_info: dict[str, str]                              # 1 论文信息：标题/作者/机构/年份/链接
+    one_line_summary: str = ""                              # 2 一句话总结
+    contributions: list[str] = field(default_factory=list)  # 3 核心贡献
+    method: str = ""                                        # 4 方法拆解
+    experiments: list[str] = field(default_factory=list)    # 5 实验分析
+    limitations: list[str] = field(default_factory=list)    # 6 局限性
+    scenario: str = ""                                      # 7 适用场景与一句话评价
+    related_directions: list[str] = field(default_factory=list)  # 8 关联推荐（相关研究方向）
+
+
+# ═══════════════════════════════════════
+# 8 main.py 汇总：最终结果
+# ═══════════════════════════════════════
+@dataclass
+class FinalResult:
+    """最终输出：整个任务的成果，frontend 直接展示它"""
+    mode: str                                   # 任务模式（前端按它选渲染方式）
+    question: str                               # 用户问题
+    report: Report | None = None                # 报告（调研=图文报告，多篇对比=综述报告；单篇精读为空）
+    suggestion: Suggestion | None = None        # 建议（方向/研究空白点；单篇精读为空）
+    deep_read: DeepReadReport | None = None     # 单篇精读八段式报告（仅单篇论文模式有值）
+    warning_flags: list[str] = field(default_factory=list)  # 验证未通过的警告标签（展示"请人工复核"）
+
+
+# ═══════════════════════════════════════
+# 9 LangGraph 状态机的"黑板"：所有 Agent 往这里读写
+# ═══════════════════════════════════════
+@dataclass
+class FlowState:
+    """LangGraph 状态机全量状态（HUMAN_IN_LOOP 的重试字段都在这）"""
+    mode: str = MODE_SURVEY                                        # 任务模式
+    question: str = ""                                             # 用户问题（调研模式）或任务描述
+    papers: list[PaperSource] = field(default_factory=list)        # 论文列表（论文分析模式用）
+    outline: Outline | None = None                                 # 规划师产出的大纲
+    outline_retry_count: int = 0                                   # 大纲重试次数（0-1，满1进 HUMAN_IN_LOOP）
+    evidences: list[Evidence] = field(default_factory=list)        # 所有研究员产出的证据汇总
+    report: Report | None = None                                   # 写作者产出的报告
+    report_retry_count: int = 0                                    # 报告重试次数（0-1，满1进 HUMAN_IN_LOOP）
+    verifier_feedback: str = ""                                    # 验证员修改意见（注入 Writer 重写 prompt）
+    warning_flags: list[str] = field(default_factory=list)         # 未通过项警告标签（1次不过时记录）
+    suggestion: Suggestion | None = None                           # 建议 Agent 产出
+    human_feedback: str = ""                                       # 用户在 HUMAN_IN_LOOP 输入的修正意见
+    final: FinalResult | None = None                               # 最终结果（给前端展示）
+
+
+# ═══════════════════════════════════════
+# 10 记忆层数据结构（不参与主流程，memory 模块单独用）
+# ═══════════════════════════════════════
+@dataclass
+class SurveyRecord:
+    """调研模式的历史记录（存 Milvus memory_survey 向量集合）"""
+    record_id: str                          # 记录唯一编号（向量主键）
+    topic: str                              # 研究主题（生成 embedding 的文本来源）
+    report_summary: str                     # 完整报告摘要（向量的 payload）
+    embedding: list[float] = field(default_factory=list)  # 主题 embedding 向量
+    created_at: str = ""                    # 创建时间
+
+
+@dataclass
+class PaperRecord:
+    """论文模式的历史记录（存 Milvus memory_paper 向量集合）"""
+    record_id: str                          # 记录唯一编号（向量主键）
+    topic: str                              # 论文主题（生成 embedding 的文本来源）
+    analysis_conclusion: str                # 分析结论（向量的 payload）
+    paper_titles: list[str] = field(default_factory=list)  # 本次涉及哪些论文
+    embedding: list[float] = field(default_factory=list)    # 主题 embedding 向量
+    created_at: str = ""                    # 创建时间
+
+
+@dataclass
+class ReadingStatus:
+    """用户对一篇论文的阅读状态（存 SQLite paper_reading_status 表）"""
+    user_id: str                            # 用户标识
+    paper_title: str                        # 论文标题
+    link: str = ""                          # 论文链接
+    status: str = "想读"                    # 状态：已读 / 想读 / 不相关
+    updated_at: str = ""                    # 最近更新时间
+
+
+@dataclass
+class TaskRecord:
+    """任务日志：记录一次任务的耗时和成本（存 SQLite task_log 表）"""
+    task_id: str                            # 任务唯一编号
+    mode: str = MODE_SURVEY                 # 任务模式
+    question: str = ""                      # 用户问题/任务描述
+    duration_sec: float = 0.0               # 任务耗时（秒）
+    token_usage: int = 0                    # token 消耗
+    cost: float = 0.0                       # 预估成本（元）
+    accepted: bool = False                  # 用户最终是否采纳报告
+    created_at: str = ""                    # 完成时间
+
+
+@dataclass
+class UserConfig:
+    """用户持久化配置（存 SQLite user_config 表，key=user_id）"""
+    user_id: str                            # 用户唯一标识（主键）
+    preferred_mode: str = MODE_SURVEY       # 上次使用的模式，每次进入页面自动恢复
+    theme: str = "light"                    # 界面主题（预留，后续扩展用）

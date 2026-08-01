@@ -1,0 +1,21 @@
+# AcademicMind 完整环境文件（conda）
+# 使用：conda env create -f environment.yml
+# 版本与你本机实测通过的版本一致，保证搭档复现出的环境完全相同
+name: academicmind
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.13
+  - pip
+  - pip:
+      - langgraph==1.1.6             # 多智能体框架
+      - streamlit==1.51.0            # 前端界面
+      - httpx==0.28.1                # 调 DeepSeek/Qwen-VL 等 API
+      - milvus-lite==3.0             # 向量记忆（含 pymilvus）
+      - arxiv==4.0.1                 # arXiv API
+      - pandas==2.3.3                # 数据处理
+      - python-dotenv==1.1.0         # 读 .env 配置
+      - sentence-transformers==5.4.1 # BGE-small 向量（模型权重首次用需下载）
+      - docling==2.117.0             # PDF 解析（较重，含本地小模型）
+      - ragas==0.4.3                 # 质量评估
