@@ -8,6 +8,9 @@ from dataclasses import dataclass
 import httpx
 
 from .config import DEEPSEEK, QWEN_VL
+from .logger import get_logger
+
+log = get_logger("llm_client")  # 本模块日志器，排错时看 API 调用情况用
 
 RETRY_TIMES = 2  # 网络失败最多重试次数
 
@@ -35,6 +38,7 @@ def estimate_cost(input_tokens: int, output_tokens: int, model: str = "deepseek"
 
 def chat(system: str, user: str, max_tokens: int | None = None) -> LLMResponse:
     """调 DeepSeek 文本生成：system 是角色设定，user 是提问内容，返回 LLMResponse"""
+    log.info("DeepSeek 文本调用开始：model=%s", DEEPSEEK.model)
     url = f"{DEEPSEEK.base_url.rstrip('/')}/chat/completions"
     payload = {
         "model": DEEPSEEK.model,
@@ -50,6 +54,7 @@ def chat(system: str, user: str, max_tokens: int | None = None) -> LLMResponse:
 
 def vision(image: str, prompt: str) -> LLMResponse:
     """调 Qwen-VL 理解图片：image 是图片 URL 或本地文件路径，prompt 是问它什么"""
+    log.info("Qwen-VL 看图调用开始：model=%s", QWEN_VL.model)
     url = f"{QWEN_VL.base_url.rstrip('/')}/chat/completions"
     payload = {
         "model": QWEN_VL.model,
@@ -66,17 +71,21 @@ def vision(image: str, prompt: str) -> LLMResponse:
 def _post(url: str, payload: dict, api_key: str, timeout: float) -> dict:
     """发 POST 请求带重试：4xx 不重试直接抛错，5xx/网络错误重试"""
     headers = {"Authorization": f"Bearer {api_key}"}
-    for _ in range(RETRY_TIMES + 1):
+    for attempt in range(RETRY_TIMES + 1):
         try:
             with httpx.Client(timeout=timeout) as client:
                 resp = client.post(url, json=payload, headers=headers)
                 resp.raise_for_status()
+                log.debug("API 请求成功：%s（第 %d 次尝试）", url, attempt + 1)
                 return resp.json()
         except httpx.HTTPStatusError as e:
             if 400 <= e.response.status_code < 500:
+                log.error("API 请求被拒（%s）：%s，请检查 key 和参数", e.response.status_code, url)
                 raise  # 请求本身有问题（key 错、参数错），重试也没用
-        except httpx.HTTPError:
-            pass
+            log.warning("API 返回 %s，准备重试：%s", e.response.status_code, url)
+        except httpx.HTTPError as e:
+            log.warning("网络异常（%s），准备重试：%s", type(e).__name__, url)
+    log.error("API 调用多次重试仍失败：%s", url)
     raise RuntimeError(f"API 调用多次重试仍失败：{url}")
 
 
@@ -86,6 +95,7 @@ def _to_response(data: dict, model: str) -> LLMResponse:
     usage = data.get("usage", {})
     input_tokens = usage.get("prompt_tokens", 0)
     output_tokens = usage.get("completion_tokens", 0)
+    log.debug("模型返回：输入 %s token，输出 %s token", input_tokens, output_tokens)
     return LLMResponse(
         text=text,
         input_tokens=input_tokens,

@@ -24,6 +24,8 @@ Thumbs.db
 data/
 logs/
 *.log
+# 日志器（core/logger.py）生成的日志文件
+data/logs/
 
 # 测试与覆盖率（evaluation 评估阶段用）
 .pytest_cache/

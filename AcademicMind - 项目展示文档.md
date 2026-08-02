@@ -70,6 +70,7 @@ memory/       SQLite：用户配置 + 阅读记录；Milvus Lite：向量记忆
 skills/       论文精读 skill（单篇论文八段式精读）
 evaluation/   RAGAS 质量评估
 core/schemas.py  数据契约（Outline/Evidence/Report/Suggestion 贯穿全程）
+core/logger.py   统一日志出口（控制台 + data/logs/app.log 文件）
 
 模型调用层：
 - 所有文本 Agent 通过统一 HTTP Client 调用 DeepSeek-V3 API
@@ -336,6 +337,7 @@ AcademicMind/
 │   ├── __init__.py
 │   ├── config.py       # 模型配置：API key、模型名称、上下文长度
 │   ├── llm_client.py   # 统一模型调用层：DeepSeek API + Qwen-VL API 封装
+│   ├── logger.py       # 统一日志出口：get_logger()，控制台 + data/logs/app.log
 │   └── schemas.py      # 数据契约：全项目统一的数据结构定义
 ├── agent/              # 多Agent骨架（共用同一模型，通过 system prompt 区分角色）
 │   ├── planner.py      # 规划师Agent：拆解问题，制定研究大纲
@@ -386,19 +388,20 @@ AcademicMind/
 
 ### 9.2 开发顺序（依赖关系）
 
-按依赖顺序推进：`core/config.py → core/llm_client.py → core/schemas.py → main.py → memory → skills → multimodal → frontend → evaluation`
+按依赖顺序推进：`core/logger.py → core/config.py → core/llm_client.py → core/schemas.py → main.py → memory → skills → multimodal → frontend → evaluation`
 
 | 顺序 | 模块 | 职责说明 | 为什么排这个位置 |
 | :--- | :--- | :--- | :--- |
-| 1 | core/config.py | 统一配置：API key、模型名称、上下文长度、预算上限 | 所有模块依赖 |
-| 2 | core/llm_client.py | 统一模型调用层：封装 DeepSeek API 和 Qwen-VL API，对外暴露 `chat()` 和 `vision()` 接口 | Agent 和 skill 都依赖 |
-| 3 | core/schemas.py | 数据契约：全项目统一的数据结构定义 | 先定稿，后续模块按此对接 |
-| 4 | main.py | 系统入口：任务分流 + LangGraph 状态机编排（含 HUMAN_IN_LOOP） | 依赖 config、llm_client、schemas |
-| 5 | memory/ | SQLite：用户配置、阅读记录、任务日志；Milvus Lite：向量记忆 | 独立模块，先跑通数据存取 |
-| 6 | skills/ | 论文精读 skill：单篇论文智能解析 + 两阶段深读 + 八段式报告 | 独立能力模块，按 schemas 契约实现 |
-| 7 | multimodal/ | Milvus Lite 图片向量索引、视觉工作记忆、Qwen-VL API 调用 | 依赖记忆库的数据结构；为 Researcher/Writer 提供检索接口 |
-| 8 | frontend/ | Streamlit 界面：模式切换 + 提问入口 + 报告展示 + HUMAN_IN_LOOP 交互 | 依赖 main.py 的完整流程与数据结构 |
-| 9 | evaluation/ | RAGAS 评估：检索相关性、答案忠实度、简易图文一致性 | 最后接入，验证全链路输出质量 |
+| 1 | core/logger.py | 统一日志出口：get_logger()，控制台 + data/logs/app.log | config 和 llm_client 都依赖，最底层 |
+| 2 | core/config.py | 统一配置：API key、模型名称、上下文长度、预算上限 | 所有模块依赖 |
+| 3 | core/llm_client.py | 统一模型调用层：封装 DeepSeek API 和 Qwen-VL API，对外暴露 `chat()` 和 `vision()` 接口 | Agent 和 skill 都依赖 |
+| 4 | core/schemas.py | 数据契约：全项目统一的数据结构定义 | 先定稿，后续模块按此对接 |
+| 5 | main.py | 系统入口：任务分流 + LangGraph 状态机编排（含 HUMAN_IN_LOOP） | 依赖 logger、config、llm_client、schemas |
+| 6 | memory/ | SQLite：用户配置、阅读记录、任务日志；Milvus Lite：向量记忆 | 独立模块，先跑通数据存取 |
+| 7 | skills/ | 论文精读 skill：单篇论文智能解析 + 两阶段深读 + 八段式报告 | 独立能力模块，按 schemas 契约实现 |
+| 8 | multimodal/ | Milvus Lite 图片向量索引、视觉工作记忆、Qwen-VL API 调用 | 依赖记忆库的数据结构；为 Researcher/Writer 提供检索接口 |
+| 9 | frontend/ | Streamlit 界面：模式切换 + 提问入口 + 报告展示 + HUMAN_IN_LOOP 交互 | 依赖 main.py 的完整流程与数据结构 |
+| 10 | evaluation/ | RAGAS 评估：检索相关性、答案忠实度、简易图文一致性 | 最后接入，验证全链路输出质量 |
 
 ---
 
