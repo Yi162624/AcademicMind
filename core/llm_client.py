@@ -16,8 +16,8 @@ RETRY_TIMES = 2  # 网络失败最多重试次数
 
 # 单价：每百万 token 多少钱（输入, 输出），用于估算单次成本
 _PRICE = {
-    "deepseek": (2.0, 8.0),
-    "qwen_vl": (2.0, 8.0),
+    "deepseek": (1.0, 2.0),
+    "qwen_vl": (2.0, 5.0),
 }
 
 
@@ -39,23 +39,24 @@ def estimate_cost(input_tokens: int, output_tokens: int, model: str = "deepseek"
 def chat(system: str, user: str, max_tokens: int | None = None) -> LLMResponse:
     """调 DeepSeek 文本生成：system 是角色设定，user 是提问内容，返回 LLMResponse"""
     log.info("DeepSeek 文本调用开始：model=%s", DEEPSEEK.model)
-    url = f"{DEEPSEEK.base_url.rstrip('/')}/chat/completions"
+    url = f"{DEEPSEEK.base_url.rstrip('/')}/chat/completions"    # API 地址
     payload = {
-        "model": DEEPSEEK.model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
+        "model": DEEPSEEK.model,                     # 模型名称
+        "messages": [  
+            {"role": "system", "content": system},      # 系统消息
+            {"role": "user", "content": user},          # 用户消息
         ],
-        "max_tokens": max_tokens or DEEPSEEK.max_tokens,
+        "max_tokens": max_tokens or DEEPSEEK.max_tokens,   # 最大 token 数
     }
-    data = _post(url, payload, DEEPSEEK.api_key, DEEPSEEK.timeout)
-    return _to_response(data, "deepseek")
+    data = _post(url, payload, DEEPSEEK.api_key, DEEPSEEK.timeout)  # 发 POST 请求
+    log.debug("DeepSeek 文本调用返回 token 用量：%s", data["usage"])   # 记录 token 用量
+    return _to_response(data, "deepseek")             # 解析返回数据
 
 
 def vision(image: str, prompt: str) -> LLMResponse:
     """调 Qwen-VL 理解图片：image 是图片 URL 或本地文件路径，prompt 是问它什么"""
     log.info("Qwen-VL 看图调用开始：model=%s", QWEN_VL.model)
-    url = f"{QWEN_VL.base_url.rstrip('/')}/chat/completions"
+    url = f"{QWEN_VL.base_url.rstrip('/')}/chat/completions"    # API 地址
     payload = {
         "model": QWEN_VL.model,
         "messages": [{"role": "user", "content": [
@@ -70,8 +71,8 @@ def vision(image: str, prompt: str) -> LLMResponse:
 
 def _post(url: str, payload: dict, api_key: str, timeout: float) -> dict:
     """发 POST 请求带重试：4xx 不重试直接抛错，5xx/网络错误重试"""
-    headers = {"Authorization": f"Bearer {api_key}"}
-    for attempt in range(RETRY_TIMES + 1):
+    headers = {"Authorization": f"Bearer {api_key}"}      # API 密钥
+    for attempt in range(RETRY_TIMES + 1):        # 最多重试 2 次
         try:
             with httpx.Client(timeout=timeout) as client:
                 resp = client.post(url, json=payload, headers=headers)
@@ -91,23 +92,23 @@ def _post(url: str, payload: dict, api_key: str, timeout: float) -> dict:
 
 def _to_response(data: dict, model: str) -> LLMResponse:
     """把 API 返回的 JSON 整理成 LLMResponse，顺带算好花费"""
-    text = data["choices"][0]["message"]["content"]
-    usage = data.get("usage", {})
-    input_tokens = usage.get("prompt_tokens", 0)
-    output_tokens = usage.get("completion_tokens", 0)
-    log.debug("模型返回：输入 %s token，输出 %s token", input_tokens, output_tokens)
-    return LLMResponse(
-        text=text,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        cost=estimate_cost(input_tokens, output_tokens, model),
+    text = data["choices"][0]["message"]["content"]     # 模型生成的文本
+    usage = data.get("usage", {})                       # token 用量
+    input_tokens = usage.get("prompt_tokens", 0)        # 输入 token 数
+    output_tokens = usage.get("completion_tokens", 0)   # 输出 token 数
+    log.debug("模型返回：输入 %s token，输出 %s token", input_tokens, output_tokens)     # 记录 token 用量
+    return LLMResponse(             # 返回 LLMResponse 对象
+        text=text,                                  
+        input_tokens=input_tokens,                  
+        output_tokens=output_tokens,                
+        cost=estimate_cost(input_tokens, output_tokens, model),  
     )
 
 
 def _to_image_url(image: str) -> str:
     """图片转 API 认的格式：http(s) 链接直接用，本地文件转 base64 data url"""
-    if image.startswith(("http://", "https://", "data:")):
+    if image.startswith(("http://", "https://", "data:")):       # 如果是 URL 或 data url，直接返回
         return image
-    with open(image, "rb") as f:
-        encoded = base64.b64encode(f.read()).decode()
-    return f"data:image/png;base64,{encoded}"
+    with open(image, "rb") as f:                        # 读取本地文件内容
+        encoded = base64.b64encode(f.read()).decode()   # 编码为 base64 字符串
+    return f"data:image/png;base64,{encoded}"           # 返回 base64 data url

@@ -134,10 +134,10 @@ class Paper:
 
 @dataclass
 class Suggestion:
-    """建议Agent产出：调研模式=研究方向；分析模式=研究空白点"""
-    directions: list[str] = field(default_factory=list)   # 调研模式=3个方向；分析模式=研究空白点
+    """建议Agent产出：调研模式=研究方向+论文+行动；分析模式=论文+行动（不给方向）"""
+    directions: list[str] = field(default_factory=list)   # 调研模式=3个方向；分析模式留空[]
     papers: list[Paper] = field(default_factory=list)     # 5篇最值得精读的论文（分析模式可为空）
-    actions: list[str] = field(default_factory=list)      # 下一步行动清单
+    actions: list[str] = field(default_factory=list)      # 下一步行动清单（建议 3-5 条，Advisor prompt 里强制）
 
 
 # ═══════════════════════════════════════
@@ -177,7 +177,7 @@ class FinalResult:
     mode: str                                   # 任务模式（前端按它选渲染方式）
     question: str                               # 用户问题
     report: Report | None = None                # 报告（调研=图文报告，多篇对比=综述报告；单篇精读为空）
-    suggestion: Suggestion | None = None        # 建议（方向/研究空白点；单篇精读为空）
+    suggestion: Suggestion | None = None        # 建议（方向/论文+行动（分析模式留空）；单篇精读为空）
     deep_read: DeepReadReport | None = None     # 单篇精读八段式报告（仅单篇论文模式有值）
     warning_flags: list[str] = field(default_factory=list)  # 验证未通过的警告标签（展示"请人工复核"）
 
@@ -233,7 +233,7 @@ class ReadingStatus:
     user_id: str                            # 用户标识
     paper_title: str                        # 论文标题
     link: str = ""                          # 论文链接
-    status: str = "想读"                    # 状态：已读 / 想读 / 不相关
+    status: str = "未读"                    # 状态：未读 / 已读 / 不相关
     updated_at: str = ""                    # 最近更新时间
 
 
