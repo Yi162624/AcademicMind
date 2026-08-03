@@ -191,6 +191,8 @@ class FlowState:
     mode: str = MODE_SURVEY                                        # 任务模式
     question: str = ""                                             # 用户问题（调研模式）或任务描述
     papers: list[PaperSource] = field(default_factory=list)        # 论文列表（论文分析模式用）
+    papers_relevant: bool = True                                   # 论文是否彼此相关（paper模式≥2篇，相关性检查节点判断）
+    relevance_note: str = ""                                       # 相关性说明：低相关时写明哪些论文差异大（展示给用户/警告用）
     outline: Outline | None = None                                 # 规划师产出的大纲
     outline_retry_count: int = 0                                   # 大纲重试次数（0-1，满1进 HUMAN_IN_LOOP）
     evidences: list[Evidence] = field(default_factory=list)        # 所有研究员产出的证据汇总

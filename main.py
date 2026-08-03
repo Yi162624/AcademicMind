@@ -2,7 +2,7 @@
 # 作用：启动任务（run_task）和恢复被暂停的任务（resume_task）
 #       内部用 LangGraph 把 5 个 Agent 串起来跑
 # 分工：编排逻辑在本文件，Agent 干活在 agent/（搭档实现）
-# 流程：规划师→用户确认大纲→研究员→写报告→验证报告（AI）→给建议
+# 流程：查论文相关性→规划师→用户确认大纲→研究员→写报告→验证报告（AI）→给建议
 
 import argparse
 import time
@@ -36,7 +36,7 @@ _START_TIMES: dict[str, float] = {}
 class GraphState(TypedDict):
     """LangGraph 状态机的"盒子"：flow 是整个任务的"黑板"，route 是节点间的路由标记"""
     flow: FlowState   # 全流程数据（schemas.py 里定好的结构）
-    route: str        # 路标：用户确认大纲/校验报告节点写 pass/retry，条件边读它决定往哪走
+    route: str        # 路标：几个分支节点写 pass/retry/end，条件边读它决定往哪走
 
 
 def _issue_to_dict(issue) -> dict:
@@ -76,6 +76,39 @@ def _build_graph():
         ) from e
 
     # ═══ 节点函数：每个节点只做三件事：从黑板取数 → 调对应 Agent → 写回黑板 ═══
+
+    def check_relevance_node(state: GraphState) -> dict:
+        """论文相关性检查节点：paper模式≥2篇才查；相关直接过，低相关挂起问用户"""
+        flow = state["flow"]
+        # 调研模式或单篇论文不用查相关性，直接放行
+        if flow.mode != MODE_PAPER or len(flow.papers) < 2:
+            return {"flow": flow, "route": "pass"}
+        # memory 模块是本人负责的，还没写好时给明确提示
+        try:
+            from memory.paper_relevance import check_paper_relevance
+        except ImportError as e:
+            raise RuntimeError(
+                f"memory/paper_relevance.py 还没实现（本人负责），相关性检查起不来：{e}"
+            ) from e
+        flow.papers_relevant, flow.relevance_note = check_paper_relevance(flow.papers)
+        if flow.papers_relevant:
+            return {"flow": flow, "route": "pass"}   # 论文相关，直接进规划师
+        # 低相关 → 挂起，告诉用户哪些论文差异大，让用户决定
+        decision = interrupt({
+            "stage": "relevance",                    # 前端据此弹"相关性提示"界面
+            "note": flow.relevance_note,             # 哪些论文相关性低
+        })
+        if decision.get("choice") == "continue":
+            # 用户坚持继续 → 记警告"对比仅供参考"，进规划师
+            flow.warning_flags.append(f"论文相关性较低（用户选择继续）：{flow.relevance_note}，对比仅供参考")
+            return {"flow": flow, "route": "pass"}
+        # 用户选择取消 → 直接结束，不带报告
+        flow.final = FinalResult(
+            mode=flow.mode,
+            question=flow.question,
+            warning_flags=["已按用户要求取消：论文相关性低，建议分开分析"],
+        )
+        return {"flow": flow, "route": "end"}
 
     def planner_node(state: GraphState) -> dict:
         """规划师节点：拆解问题出大纲；被退回重拆时把用户的意见喂给它"""
@@ -163,6 +196,7 @@ def _build_graph():
 
     # ═══ 搭图：节点 + 连线 + 条件边 ═══
     g = StateGraph(GraphState)
+    g.add_node("check_relevance", check_relevance_node)
     g.add_node("planner", planner_node)
     g.add_node("user_check_outline", user_check_outline_node)
     g.add_node("researcher", researcher_node)
@@ -171,7 +205,10 @@ def _build_graph():
     g.add_node("advisor", advisor_node)
     g.add_node("finalize", finalize_node)
 
-    g.add_edge(START, "planner")
+    g.add_edge(START, "check_relevance")
+    # 相关性检查结果决定下一步：pass 去规划师，end 直接结束（用户取消）
+    g.add_conditional_edges("check_relevance", lambda s: s["route"],
+                            {"pass": "planner", "end": END})
     g.add_edge("planner", "user_check_outline")
     # 用户确认大纲结果决定下一步：pass 去搜集资料，retry 退回规划师重拆
     g.add_conditional_edges("user_check_outline", lambda s: s["route"],
@@ -250,7 +287,7 @@ def run_task(mode: str = MODE_SURVEY, question: str = "", papers: list[PaperSour
 
     flow = FlowState(mode=mode, question=question, papers=papers)
     _START_TIMES[thread_id] = time.time()               # 记开始时间，跨挂起算总耗时
-    result = _get_graph().invoke({"flow": flow, "route": "planner"}, config)
+    result = _get_graph().invoke({"flow": flow, "route": "check_relevance"}, config)
 
     interrupts = result.get("__interrupt__")            # 被挂起时 LangGraph 会塞这个字段
     if interrupts:
@@ -263,8 +300,9 @@ def run_task(mode: str = MODE_SURVEY, question: str = "", papers: list[PaperSour
 def resume_task(thread_id: str, choice: str, feedback: str = "") -> tuple[dict, dict | FinalResult]:
     """恢复被挂起的任务：让流程从挂起点接着跑，并把用户决定喂回去。
     choice：accept=接受当前版本继续 / revise=给修改意见（AI 按意见改，不是强制全部重写）
+            / continue=相关性低仍继续生成 / cancel=相关性低时取消
     feedback：choice 选 revise 时填的修改意见
-    返回格式和 run_task 一样：dict+stage=又挂起（大纲给了意见会再挂起确认），FinalResult=跑完了
+    返回格式和 run_task 一样：dict+stage=又挂起（相关性提示/大纲确认/报告复核），FinalResult=跑完了
     """
     config = {"configurable": {"thread_id": thread_id}}
     # Command(resume=...) 会把值原样塞回 interrupt() 的返回值，节点拿到后决定走向
@@ -294,6 +332,9 @@ def main():
         if out["stage"] == "outline":
             # 大纲确认环节：把规划师生成的大纲打出来看
             log.info("规划师生成大纲（等待用户确认）：%s", out["outline"])
+        elif out["stage"] == "relevance":
+            # 论文相关性提示：打印哪些论文差异大
+            log.info("论文相关性较低（等待用户决定）：%s", out["note"])
         else:
             log.info("报告校验挂起（%s），前端会弹按钮；命令行演示到此为止", out["stage"])
             for issue in out.get("issues", []):
