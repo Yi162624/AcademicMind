@@ -131,8 +131,13 @@ def _build_graph():
             if decision.get("choice") == "accept":
                 flow.warning_flags.append(f"报告未完全通过（已人工接受）：{result.feedback}")
                 return {"flow": flow, "route": "pass"}
-            flow.report_retry_count = 0
-            flow.verifier_feedback = decision.get("feedback", result.feedback)
+            # 用户给了修改意见 → 写进 verifier_feedback，退回写作者按意见修改
+            flow.verifier_feedback = decision.get("feedback", "")
+            if not flow.verifier_feedback.strip():
+                # 选了修改但没写字 → 等同于接受当前报告，别让写作者白跑一趟
+                flow.warning_flags.append(f"报告未完全通过（已人工接受）：{result.feedback}")
+                return {"flow": flow, "route": "pass"}
+            # 不重置计数器：改完最多再自动试 1 次，还不过就再次挂起问用户
             return {"flow": flow, "route": "retry"}
         flow.report_retry_count += 1
         flow.verifier_feedback = result.feedback
