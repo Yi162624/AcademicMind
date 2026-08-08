@@ -39,13 +39,13 @@
 
 **模式切换按钮**：页面**左上角**设置常驻模式按钮（🔍 调研模式 / 📄 论文模式），用户可随时一键切换。
 
-**模式状态持久化**：用户选择的模式写入 **SQLite 用户配置表**（key=user_id），每次进入页面自动恢复上次使用过的模式，无需重复选择；用户切换模式后配置同步更新，下次打开仍是新选的模式。
+**模式状态持久化**：用户选择的模式写入 **SQLite 用户配置表**（本地单例，固定一行，不区分用户），每次进入页面自动恢复上次使用过的模式，无需重复选择；用户切换模式后配置同步更新，下次打开仍是新选的模式。
 
 **数据隔离策略**：两种模式的历史数据分开存储、互不干扰，前端按当前模式路由查询：
 
 - `memory_survey/`（Milvus Lite 向量集合）—— 调研模式：研究主题、报告摘要向量
 - `memory_paper/`（Milvus Lite 向量集合）—— 论文模式：分析过的论文列表、综述结果
-- `user_config.db`（SQLite）—— 用户配置（含模式偏好）与论文阅读记录，独立存放，不属于任何单一模式
+- `user_config.db`（SQLite）—— 用户配置（含模式偏好）与单篇精读历史，独立存放，不属于任何单一模式
 
 ### 2.2 系统架构
 
@@ -66,7 +66,7 @@ main.py（系统入口，按输入自动分流）
                 └──────────────┴──────────┴─────────┴──────────┘
                              调用支撑模块
 multimodal/   图片上传/提取 → Qwen2.5-VL-7B API（图表理解）
-memory/       SQLite：用户配置 + 阅读记录；Milvus Lite：向量记忆
+memory/       SQLite：模式偏好 + 单篇精读历史；Milvus Lite：向量记忆
 skills/       论文精读 skill（单篇论文八段式精读）
 evaluation/   RAGAS 质量评估
 core/schemas.py  数据契约（Outline/Evidence/Report/Suggestion 贯穿全程）
@@ -276,8 +276,8 @@ Planner 拆解维度与分组 → 用户确认 → N×Researcher 并行分析 �
 ### 4.1 系统如何记住？
 
 **用户配置层（SQLite）**：
-- 用户选择的模式（调研/论文）存入 `user_config` 表，每次进入自动恢复
-- 论文分析模式下，用户对论文的**阅读状态**（未读/已读/不相关）存入 `paper_reading_status` 表，供用户自行查看历史阅读记录
+- 用户选择的模式（调研/论文）存入 `user_config` 表（本地单例，不区分用户），每次进入自动恢复
+- 单篇精读历史：论文分析模式下单篇精读完成后，将"论文指纹（arXiv ID/DOI 优先，其次链接，最后标题）+ 精读结论摘要"存入 `paper_analysis` 表；用户后续用 PDF 或链接走同一套指纹即可搜索历史精读记录（搜到即"已分析"，未搜到即"未分析"），多篇对比流程不写入此表
 
 **向量记忆层（Milvus Lite）**：
 - 调研模式：将"研究主题 embedding + 完整报告摘要"存入 `memory_survey`，支持用户**手动检索**历史调研记录
@@ -320,7 +320,7 @@ Planner 拆解维度与分组 → 用户确认 → N×Researcher 并行分析 �
 | 前端界面 | Streamlit（极简，模式切换 + 输入 + 结果展示）|
 | 数据源 | arXiv API + Semantic Scholar API |
 | 向量记忆 | Milvus Lite（嵌入式向量数据库）|
-| 结构化存储 | SQLite（用户配置、阅读记录、任务元数据）|
+| 结构化存储 | SQLite（模式偏好、单篇精读历史、任务元数据）|
 | PDF 解析 | Docling（IBM 开源，文本 + 表格 + 图片一体化解析）|
 | 输入兼容 | arXiv 链接 / PDF 文件 / 其他链接，统一转 PDF 解析（Docling）|
 | 质量评估 | RAGAS（文本指标）+ 简易图文一致性检查 |
@@ -359,7 +359,7 @@ AcademicMind/
 │       ├── SKILL.md            # skill 说明：作用、输入输出、提示词模板
 │       └── skill.py            # 实现：智能解析 → 两阶段深读 → 输出八段式报告
 ├── memory/             # 记忆模块
-│   ├── sqlite_store.py         # SQLite：用户配置 + 阅读记录 + 任务日志
+│   ├── sqlite_store.py         # SQLite：模式偏好 + 单篇精读历史 + 任务日志
 │   └── milvus_lite_store.py    # Milvus Lite：向量记忆（文本 + 图片）
 ├── frontend/           # 前端界面（Streamlit）
 ├── evaluation/         # 评估模块（RAGAS）
@@ -375,7 +375,7 @@ AcademicMind/
 | 第 1 周 | LangGraph 多 Agent 骨架 + main.py 编排 + SQLite/Milvus Lite 记忆模块 | 4 个 Agent 状态机跑通（含 Verifier 回退逻辑 + HUMAN_IN_LOOP），SQLite 配置读写正常，Milvus Lite 向量存储正常 |
 | 第 2 周 | 接入 arXiv API + Semantic Scholar API + DeepSeek API + Qwen-VL API | Researcher 能返回结构化检索结果，API 调用稳定，错误降级策略生效，成本估算准确 |
 | 第 3 周 | PDF 解析方案落地（Docling）+ 论文精读 skill | 单篇论文能输出八段式精读报告，arXiv 链接可自动转 PDF 解析，图表页通过 API 理解 |
-| 第 4 周 | Milvus Lite 图文检索整合 + 行动建议 Agent + 论文阅读状态反馈 | 研究员能返回图片并通过 API 理解，行动建议 Agent 能生成 3 个方向建议，用户可标记论文阅读状态 |
+| 第 4 周 | Milvus Lite 图文检索整合 + 行动建议 Agent + 单篇精读历史记录 | 研究员能返回图片并通过 API 理解，行动建议 Agent 能生成 3 个方向建议，单篇精读完成后可存入精读历史、按 PDF/链接搜索历史精读记录 |
 | 第 5 周 | 验证员接入 RAGAS + 全流程联调 + 评估数据收集 | 完整闭环跑通，输出图文报告+建议+论文清单，有初步评估数据 |
 | 第 6 周 | API 压力测试 + 成本优化 + 视频录制 | 全链路在 API 模式下稳定运行，单任务成本可控，录制演示视频 |
 
@@ -402,7 +402,7 @@ AcademicMind/
 | 3 | core/llm_client.py | 统一模型调用层：封装 DeepSeek API 和 Qwen-VL API，对外暴露 `chat()` 和 `vision()` 接口 | Agent 和 skill 都依赖 |
 | 4 | core/schemas.py | 数据契约：全项目统一的数据结构定义 | 先定稿，后续模块按此对接 |
 | 5 | main.py | 系统入口：任务分流 + LangGraph 状态机编排（含 HUMAN_IN_LOOP） | 依赖 logger、config、llm_client、schemas |
-| 6 | memory/ | SQLite：用户配置、阅读记录、任务日志；Milvus Lite：向量记忆 | 独立模块，先跑通数据存取 |
+| 6 | memory/ | SQLite：模式偏好、单篇精读历史、任务日志；Milvus Lite：向量记忆 | 独立模块，先跑通数据存取 |
 | 7 | skills/ | 论文精读 skill：单篇论文智能解析 + 两阶段深读 + 八段式报告 | 独立能力模块，按 schemas 契约实现 |
 | 8 | multimodal/ | Milvus Lite 图片向量索引、视觉工作记忆、Qwen-VL API 调用 | 依赖记忆库的数据结构；为 Researcher/Writer 提供检索接口 |
 | 9 | frontend/ | Streamlit 界面：模式切换 + 提问入口 + 报告展示 + HUMAN_IN_LOOP 交互 | 依赖 main.py 的完整流程与数据结构 |

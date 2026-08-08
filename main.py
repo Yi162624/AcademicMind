@@ -83,6 +83,7 @@ def _build_graph():
         # 调研模式或单篇论文不用查相关性，直接放行
         if flow.mode != MODE_PAPER or len(flow.papers) < 2:
             return {"flow": flow, "route": "pass"}
+
         # memory 模块是本人负责的，还没写好时给明确提示
         try:
             from memory.paper_relevance import check_paper_relevance
@@ -90,6 +91,8 @@ def _build_graph():
             raise RuntimeError(
                 f"memory/paper_relevance.py 还没实现（本人负责），相关性检查起不来：{e}"
             ) from e
+
+        # 检查论文相关性
         flow.papers_relevant, flow.relevance_note = check_paper_relevance(flow.papers)
         if flow.papers_relevant:
             return {"flow": flow, "route": "pass"}   # 论文相关，直接进规划师
@@ -104,9 +107,9 @@ def _build_graph():
             return {"flow": flow, "route": "pass"}
         # 用户选择取消 → 直接结束，不带报告
         flow.final = FinalResult(
-            mode=flow.mode,
-            question=flow.question,
-            warning_flags=["已按用户要求取消：论文相关性低，建议分开分析"],
+            mode=flow.mode,            # 记录模式，展示给用户看
+            question=flow.question,    # 用户原问题，展示给用户看
+            warning_flags=["已按用户要求取消：论文相关性低，建议分开分析"],   # 警告用户论文相关性低，建议分开分析
         )
         return {"flow": flow, "route": "end"}
 

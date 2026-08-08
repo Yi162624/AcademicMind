@@ -16,7 +16,7 @@
 #   7 单篇精读 skill    → DeepReadStage1（阶段1中间JSON）+ DeepReadReport（八段式报告）
 #   8 main.py 汇总      → FinalResult（report/suggestion/deep_read 三选场景，前端只认这一种格式）
 #   9 LangGraph 状态    → FlowState（状态机"黑板"，含 HUMAN_IN_LOOP 重试字段）
-#  10 记忆层            → SurveyRecord / PaperRecord（向量记忆）/ ReadingStatus / TaskRecord / UserConfig
+#  10 记忆层            → SurveyRecord / PaperRecord（向量记忆）/ PaperAnalysis / TaskRecord / UserConfig
 #
 # 为什么从前往后定：每个结构的字段由"下一棒要消费什么"决定，
 #                   先定产出、再定消费，字段才不会对不上。
@@ -230,13 +230,14 @@ class PaperRecord:
 
 
 @dataclass
-class ReadingStatus:
-    """用户对一篇论文的阅读状态（存 SQLite paper_reading_status 表）"""
-    user_id: str                            # 用户标识
+class PaperAnalysis:
+    """单篇论文的精读历史（存 SQLite paper_analysis 表）：分析过一次就记录，
+    之后用户用 PDF/链接走同一套标识（make_paper_key）就能搜回历史精读结论"""
+    paper_key: str                          # 论文指纹：arXiv ID/DOI 优先，其次链接，最后标题
     paper_title: str                        # 论文标题
     link: str = ""                          # 论文链接
-    status: str = "未读"                    # 状态：未读 / 已读 / 不相关
-    updated_at: str = ""                    # 最近更新时间
+    summary: str = ""                       # 精读结论摘要
+    created_at: str = ""                    # 分析时间
 
 
 @dataclass
@@ -254,7 +255,7 @@ class TaskRecord:
 
 @dataclass
 class UserConfig:
-    """用户持久化配置（存 SQLite user_config 表，key=user_id）"""
-    user_id: str                            # 用户唯一标识（主键）
+    """本机持久化配置（存 SQLite user_config 表，本地单例，不区分用户）。
+    对齐大型软件的通用做法（如 VS Code 的 settings.json）：设置属于"这台机器"，跟账号无关"""
     preferred_mode: str = MODE_SURVEY       # 上次使用的模式，每次进入页面自动恢复
     theme: str = "light"                    # 界面主题（预留，后续扩展用）
