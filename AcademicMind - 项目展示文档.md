@@ -88,6 +88,7 @@ core/logger.py   统一日志出口（控制台 + data/logs/app.log 文件）
    │
    └─低相关─► 挂起问用户 ──┬─ 继续（对比仅供参考）──► [Planner]
                            └─ 取消 ────────────────► [结束]
+（注：相关性检查仅在论文分析模式 ≥2 篇时执行，调研模式/单篇直接进 Planner）
 
 [用户确认大纲] 之后：
                                │
@@ -156,7 +157,7 @@ core/logger.py   统一日志出口（控制台 + data/logs/app.log 文件）
 | 用户输入 | 一个研究问题 | 1 篇或多篇论文（链接或 PDF） |
 | Planner 拆解 | 3 个子主题 + 每章图片需求 | 多篇：分析维度（方法/实验/结果/局限/结论）+ 论文分组；单篇：无 |
 | Researcher 搜集 | 并行搜文本 + 图片素材 | 多篇：按组读论文、提炼要点；单篇：由 skill 直接深读 |
-| 图片检索 | 有（SQLite pHash 去重 + 视觉工作记忆） | 有（PDF 提取图表页 → API 理解） |
+| 图片检索 | 有（SQLite pHash 去重已实现；视觉工作记忆规划中） | 有（PDF 提取图表页 → API 理解，规划中） |
 | 报告形态 | 图文交错 HTML 报告 | 单篇：八段式精读报告（skill）；多篇：对比综述报告（5 Agent） |
 | Verifier 检查 | 事实/引用/图文一致性 | 多篇：分析忠实度/引用真实性（跳过图文一致性）；单篇：无（skill 直出） |
 | Advisor 建议 | 3 个研究方向 + 5 篇核心论文 + 行动清单 | 多篇：推荐论文 + 下一步行动建议；单篇：复现/延伸建议 |
@@ -178,10 +179,10 @@ core/logger.py   统一日志出口（控制台 + data/logs/app.log 文件）
 - 3 个研究员分别负责一个子主题
 - 每个研究员同时搜集文本证据 + 图片素材
 - 文本来源：arXiv API、Semantic Scholar API
-- **文本去重**：Researcher 返回的证据在写入共享状态前，先经过轻量 embedding 模型（BGE-small，~100MB，CPU 运行）计算语义相似度，自动合并高度重复的文本片段，避免 Writer 整合时的冗余引用
-- 图片素材：存入"视觉工作记忆"（图片 + 来源 + 描述 + pHash）
+- **文本去重（规划中）**：Researcher 返回的证据在写入共享状态前，先经过轻量 embedding 模型（BGE-small，~100MB，CPU 运行）计算语义相似度，自动合并高度重复的文本片段，避免 Writer 整合时的冗余引用；当前 BGE-small 已落地于论文相关性检查（见 2.3），证据去重待迭代
+- 图片素材（规划中）：存入"视觉工作记忆"（图片 + 来源 + 描述 + pHash）
 - 图片去重：图片先算 pHash（感知哈希），再用汉明距离阈值去重（SQLite `image` 表，阈值≤5），避免同一图片重复出现
-- 图片理解：通过 Qwen2.5-VL-7B API 生成图片描述，作为证据的一部分
+- 图片理解（规划中）：通过 Qwen2.5-VL-7B API 生成图片描述，作为证据的一部分
 
 **第 3 步：写作者整合生成**
 - 综合所有证据，生成图文交错的 HTML 报告
@@ -205,7 +206,7 @@ core/logger.py   统一日志出口（控制台 + data/logs/app.log 文件）
 用户输入论文 → 判断论文数量 → 1篇：单篇精读 skill；≥2篇：5 Agent 对比流程
 ```
 
-#### 3.2.1 单篇精读（skill 能力模块）
+#### 3.2.1 单篇精读（skill 能力模块，规划中）
 
 输入固定、步骤固定、输出结构化，由一个 skill 直接完成，不经过多 Agent 协作：
 
@@ -326,7 +327,7 @@ Planner 拆解维度与分组 → 用户确认 → N×Researcher 并行分析 �
 | 质量评估 | RAGAS（文本指标）+ 简易图文一致性检查 |
 | **大语言模型** | **DeepSeek-V4-Flash API（所有文本 Agent 共用）** |
 | **视觉理解** | **Qwen2.5-VL-7B-Instruct API（图片/图表理解）** |
-| 文本去重 | BGE-small 轻量 embedding（文本语义去重，CPU 运行）|
+| 文本去重（规划中） | BGE-small 轻量 embedding（文本语义去重，CPU 运行）|
 | 图片去重 | pHash 感知哈希（汉明距离≤5，SQLite 存储）|
 | 编程语言 | Python |
 
@@ -351,19 +352,20 @@ AcademicMind/
 │   ├── writer.py       # 写作者Agent：整合生成图文报告
 │   ├── verifier.py     # 验证员Agent：全程质量检查 + 回退路由 + HUMAN_IN_LOOP
 │   └── advisor.py      # 行动建议Agent：生成研究方向建议
-├── multimodal/         # 多模态模块：图片处理与 API 视觉理解
+├── memory/             # 记忆模块
+│   ├── sqlite_store.py         # SQLite：模式偏好 + 单篇精读历史 + 任务日志 + 图片记忆（pHash）
+│   ├── milvus_lite_store.py    # Milvus Lite：向量记忆（调研+论文历史）
+│   └── paper_relevance.py      # BGE 论文相关性检查（论文分析模式 ≥2 篇时用）
+├── multimodal/         # 多模态模块：图片处理与 API 视觉理解（规划中）
 │   ├── visual_retrieval.py     # SQLite pHash 图片去重与检索
 │   ├── visual_working_memory.py # 视觉工作记忆（去重 + 来源管理）
 │   └── image_understanding.py  # 图片理解：调用 Qwen2.5-VL-7B API
-├── skills/             # 独立能力模块（即插即用，不依赖多Agent流程）
+├── skills/             # 独立能力模块（即插即用，不依赖多Agent流程）（规划中）
 │   └── paper_deep_read/        # 论文精读 skill：单篇论文八段式精读
 │       ├── SKILL.md            # skill 说明：作用、输入输出、提示词模板
 │       └── skill.py            # 实现：智能解析 → 两阶段深读 → 输出八段式报告
-├── memory/             # 记忆模块
-│   ├── sqlite_store.py         # SQLite：模式偏好 + 单篇精读历史 + 任务日志 + 图片记忆（pHash）
-│   └── milvus_lite_store.py    # Milvus Lite：向量记忆（调研+论文历史）
-├── frontend/           # 前端界面（Streamlit）
-├── evaluation/         # 评估模块（RAGAS）
+├── frontend/           # 前端界面（Streamlit）（规划中）
+├── evaluation/         # 评估模块（RAGAS）（规划中）
 └── requirements.txt    # 依赖清单
 ```
 
@@ -373,7 +375,7 @@ AcademicMind/
 
 | 周次 | 核心任务 | 验收标准 |
 | :--- | :--- | :--- |
-| 第 1 周 | LangGraph 多 Agent 骨架 + main.py 编排 + SQLite/Milvus Lite 记忆模块 | 4 个 Agent 状态机跑通（含 Verifier 回退逻辑 + HUMAN_IN_LOOP），SQLite 配置读写正常，Milvus Lite 向量存储正常 |
+| 第 1 周 | LangGraph 多 Agent 骨架 + main.py 编排 + SQLite/Milvus Lite 记忆模块 | 5 个 Agent 状态机跑通（含 Verifier 回退逻辑 + HUMAN_IN_LOOP），SQLite 配置读写正常，Milvus Lite 向量存储正常 |
 | 第 2 周 | 接入 arXiv API + Semantic Scholar API + DeepSeek API + Qwen-VL API | Researcher 能返回结构化检索结果，API 调用稳定，错误降级策略生效，成本估算准确 |
 | 第 3 周 | PDF 解析方案落地（Docling）+ 论文精读 skill | 单篇论文能输出八段式精读报告，arXiv 链接可自动转 PDF 解析，图表页通过 API 理解 |
 | 第 4 周 | Milvus Lite 图文检索整合 + 行动建议 Agent + 单篇精读历史记录 | 研究员能返回图片并通过 API 理解，行动建议 Agent 能生成 3 个方向建议，单篇精读完成后可存入精读历史、按 PDF/链接搜索历史精读记录 |

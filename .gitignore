@@ -31,3 +31,6 @@ data/logs/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# 简历素材（本地记录，不进仓库）
+Bug修复记录.md
