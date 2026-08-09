@@ -45,7 +45,7 @@
 
 - `memory_survey/`（Milvus Lite 向量集合）—— 调研模式：研究主题、报告摘要向量
 - `memory_paper/`（Milvus Lite 向量集合）—— 论文模式：分析过的论文列表、综述结果
-- `user_config.db`（SQLite）—— 用户配置（含模式偏好）与单篇精读历史，独立存放，不属于任何单一模式
+- `user_config.db`（SQLite）—— 用户配置（含模式偏好）、单篇精读历史、图片记忆（pHash 去重），独立存放，不属于任何单一模式
 
 ### 2.2 系统架构
 
@@ -66,7 +66,7 @@ main.py（系统入口，按输入自动分流）
                 └──────────────┴──────────┴─────────┴──────────┘
                              调用支撑模块
 multimodal/   图片上传/提取 → Qwen2.5-VL-7B API（图表理解）
-memory/       SQLite：模式偏好 + 单篇精读历史；Milvus Lite：向量记忆
+memory/       SQLite：模式偏好 + 单篇精读历史 + 图片记忆（pHash 去重）；Milvus Lite：向量记忆（调研+论文历史）
 skills/       论文精读 skill（单篇论文八段式精读）
 evaluation/   RAGAS 质量评估
 core/schemas.py  数据契约（Outline/Evidence/Report/Suggestion 贯穿全程）
@@ -156,7 +156,7 @@ core/logger.py   统一日志出口（控制台 + data/logs/app.log 文件）
 | 用户输入 | 一个研究问题 | 1 篇或多篇论文（链接或 PDF） |
 | Planner 拆解 | 3 个子主题 + 每章图片需求 | 多篇：分析维度（方法/实验/结果/局限/结论）+ 论文分组；单篇：无 |
 | Researcher 搜集 | 并行搜文本 + 图片素材 | 多篇：按组读论文、提炼要点；单篇：由 skill 直接深读 |
-| 图片检索 | 有（Milvus Lite 图片向量索引 + 视觉工作记忆） | 有（PDF 提取图表页 → API 理解） |
+| 图片检索 | 有（SQLite pHash 去重 + 视觉工作记忆） | 有（PDF 提取图表页 → API 理解） |
 | 报告形态 | 图文交错 HTML 报告 | 单篇：八段式精读报告（skill）；多篇：对比综述报告（5 Agent） |
 | Verifier 检查 | 事实/引用/图文一致性 | 多篇：分析忠实度/引用真实性（跳过图文一致性）；单篇：无（skill 直出） |
 | Advisor 建议 | 3 个研究方向 + 5 篇核心论文 + 行动清单 | 多篇：推荐论文 + 下一步行动建议；单篇：复现/延伸建议 |
@@ -179,8 +179,8 @@ core/logger.py   统一日志出口（控制台 + data/logs/app.log 文件）
 - 每个研究员同时搜集文本证据 + 图片素材
 - 文本来源：arXiv API、Semantic Scholar API
 - **文本去重**：Researcher 返回的证据在写入共享状态前，先经过轻量 embedding 模型（BGE-small，~100MB，CPU 运行）计算语义相似度，自动合并高度重复的文本片段，避免 Writer 整合时的冗余引用
-- 图片素材：存入"视觉工作记忆"（图片 + 来源 + 描述 + 向量 embedding）
-- 图片去重：图片先经 Qwen-VL 生成文字描述，再用 BGE 描述向量相似度阈值去重（Milvus Lite `image_memory` collection），避免同一图片重复出现
+- 图片素材：存入"视觉工作记忆"（图片 + 来源 + 描述 + pHash）
+- 图片去重：图片先算 pHash（感知哈希），再用汉明距离阈值去重（SQLite `image` 表，阈值≤5），避免同一图片重复出现
 - 图片理解：通过 Qwen2.5-VL-7B API 生成图片描述，作为证据的一部分
 
 **第 3 步：写作者整合生成**
@@ -282,7 +282,7 @@ Planner 拆解维度与分组 → 用户确认 → N×Researcher 并行分析 �
 **向量记忆层（Milvus Lite）**：
 - 调研模式：将"研究主题 embedding + 完整报告摘要"存入 `memory_survey`，支持用户**手动检索**历史调研记录
 - 论文模式：将"论文主题 embedding + 分析结论"存入 `memory_paper`，支持用户**手动检索**历史分析记录
-- 图片向量：调研模式检索到的图片存入 `image_memory` collection，用于去重和复用
+- 图片记忆：调研模式检索到的图片存入 SQLite `image` 表（含 pHash），用于去重和复用
 - 注：向量记忆仅用于历史记录的存储与检索，**不主动注入当前任务的 Prompt**
 
 ### 4.2 任务元数据记录
@@ -320,13 +320,14 @@ Planner 拆解维度与分组 → 用户确认 → N×Researcher 并行分析 �
 | 前端界面 | Streamlit（极简，模式切换 + 输入 + 结果展示）|
 | 数据源 | arXiv API + Semantic Scholar API |
 | 向量记忆 | Milvus Lite（嵌入式向量数据库）|
-| 结构化存储 | SQLite（模式偏好、单篇精读历史、任务元数据）|
+| 结构化存储 | SQLite（模式偏好、单篇精读历史、任务元数据、图片记忆 pHash 去重）|
 | PDF 解析 | Docling（IBM 开源，文本 + 表格 + 图片一体化解析）|
 | 输入兼容 | arXiv 链接 / PDF 文件 / 其他链接，统一转 PDF 解析（Docling）|
 | 质量评估 | RAGAS（文本指标）+ 简易图文一致性检查 |
 | **大语言模型** | **DeepSeek-V4-Flash API（所有文本 Agent 共用）** |
 | **视觉理解** | **Qwen2.5-VL-7B-Instruct API（图片/图表理解）** |
-| 文本/图片去重 | BGE-small 轻量 embedding（文本语义去重 + 图片描述向量去重，CPU 运行）|
+| 文本去重 | BGE-small 轻量 embedding（文本语义去重，CPU 运行）|
+| 图片去重 | pHash 感知哈希（汉明距离≤5，SQLite 存储）|
 | 编程语言 | Python |
 
 > **注**：本地不部署任何 LLM/VLM，所有模型能力通过 HTTP API 调用。本地仅运行前端、记忆模块、PDF 解析与缓存。
@@ -351,7 +352,7 @@ AcademicMind/
 │   ├── verifier.py     # 验证员Agent：全程质量检查 + 回退路由 + HUMAN_IN_LOOP
 │   └── advisor.py      # 行动建议Agent：生成研究方向建议
 ├── multimodal/         # 多模态模块：图片处理与 API 视觉理解
-│   ├── visual_retrieval.py     # Milvus Lite 图片向量索引与检索
+│   ├── visual_retrieval.py     # SQLite pHash 图片去重与检索
 │   ├── visual_working_memory.py # 视觉工作记忆（去重 + 来源管理）
 │   └── image_understanding.py  # 图片理解：调用 Qwen2.5-VL-7B API
 ├── skills/             # 独立能力模块（即插即用，不依赖多Agent流程）
@@ -359,8 +360,8 @@ AcademicMind/
 │       ├── SKILL.md            # skill 说明：作用、输入输出、提示词模板
 │       └── skill.py            # 实现：智能解析 → 两阶段深读 → 输出八段式报告
 ├── memory/             # 记忆模块
-│   ├── sqlite_store.py         # SQLite：模式偏好 + 单篇精读历史 + 任务日志
-│   └── milvus_lite_store.py    # Milvus Lite：向量记忆（文本 + 图片）
+│   ├── sqlite_store.py         # SQLite：模式偏好 + 单篇精读历史 + 任务日志 + 图片记忆（pHash）
+│   └── milvus_lite_store.py    # Milvus Lite：向量记忆（调研+论文历史）
 ├── frontend/           # 前端界面（Streamlit）
 ├── evaluation/         # 评估模块（RAGAS）
 └── requirements.txt    # 依赖清单
@@ -402,9 +403,9 @@ AcademicMind/
 | 3 | core/llm_client.py | 统一模型调用层：封装 DeepSeek API 和 Qwen-VL API，对外暴露 `chat()` 和 `vision()` 接口 | Agent 和 skill 都依赖 |
 | 4 | core/schemas.py | 数据契约：全项目统一的数据结构定义 | 先定稿，后续模块按此对接 |
 | 5 | main.py | 系统入口：任务分流 + LangGraph 状态机编排（含 HUMAN_IN_LOOP） | 依赖 logger、config、llm_client、schemas |
-| 6 | memory/ | SQLite：模式偏好、单篇精读历史、任务日志；Milvus Lite：向量记忆 | 独立模块，先跑通数据存取 |
+| 6 | memory/ | SQLite：模式偏好、单篇精读历史、任务日志、图片记忆（pHash）；Milvus Lite：向量记忆 | 独立模块，先跑通数据存取 |
 | 7 | skills/ | 论文精读 skill：单篇论文智能解析 + 两阶段深读 + 八段式报告 | 独立能力模块，按 schemas 契约实现 |
-| 8 | multimodal/ | Milvus Lite 图片向量索引、视觉工作记忆、Qwen-VL API 调用 | 依赖记忆库的数据结构；为 Researcher/Writer 提供检索接口 |
+| 8 | multimodal/ | SQLite pHash 图片去重、视觉工作记忆、Qwen-VL API 调用 | 依赖记忆库的数据结构；为 Researcher/Writer 提供检索接口 |
 | 9 | frontend/ | Streamlit 界面：模式切换 + 提问入口 + 报告展示 + HUMAN_IN_LOOP 交互 | 依赖 main.py 的完整流程与数据结构 |
 | 10 | evaluation/ | RAGAS 评估：检索相关性、答案忠实度、简易图文一致性 | 最后接入，验证全链路输出质量 |
 

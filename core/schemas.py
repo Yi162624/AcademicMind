@@ -80,7 +80,7 @@ class ImageItem:
     source: str                 # 图片来源（报告里要标引用）
     subtopic: str = ""          # 属于哪个子主题
     image_id: str = ""          # 图片唯一编号（报告里引用图片用）
-    embedding: list[float] = field(default_factory=list)  # BGE 向量（图片描述的向量），去重和检索用
+    phash: str = ""             # 图片感知哈希（hex 字符串，64位），pHash 去重用
 
 
 @dataclass

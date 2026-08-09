@@ -11,8 +11,12 @@ from logging.handlers import RotatingFileHandler
 # 日志格式：时间 级别 模块名 消息
 _FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
+# 项目根目录：用 __file__ 推导（core/ 的上一级），和 config.py 的做法一致，
+# 避免从不同目录启动时日志散落各处（本模块不 import config，防止循环依赖）
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
 # 日志文件位置（写死放 data/logs，和 config 的 DATA_DIR 默认值一致）
-_LOG_DIR = os.path.join("data", "logs")
+_LOG_DIR = os.path.join(_PROJECT_ROOT, "data", "logs")
 _LOG_FILE = os.path.join(_LOG_DIR, "app.log")
 
 _configured = False  # 标记根日志器是否配置过（防止重复加 handler）

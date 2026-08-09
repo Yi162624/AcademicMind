@@ -18,7 +18,7 @@ _MODEL_NAME = "BAAI/bge-small-zh-v1.5"
 # 相似度阈值：论文两两平均相似度低于它就判"低相关"
 _RELEVANT_THRESHOLD = 0.6
 
-_model = None                 # 全局缓存模型，整个进程只加载一次
+_model = None                   # 全局缓存模型，整个进程只加载一次
 _model_lock = threading.Lock()  # 防止多线程同时去加载模型（双检查锁）
 
 
@@ -37,9 +37,9 @@ def _get_model():
 def _paper_text(p: PaperSource) -> str:
     """拼一篇论文的向量文本：标题为主，有摘要/链接再补上（信息越多向量越准）"""
     parts = [p.title]
-    if p.abstract:
+    if p.abstract:                  # 有摘要再补上
         parts.append(p.abstract)
-    if p.link:
+    if p.link:                      # 有链接再补上
         parts.append(p.link)
     return " ".join(parts)
 
@@ -53,8 +53,8 @@ def check_paper_relevance(papers: list[PaperSource]) -> tuple[bool, str]:
 
     # 模型加载/向量化失败时不硬卡流程：按"相关"放行，只记个 warning
     try:
-        model = _get_model()
-        vecs = model.encode([_paper_text(p) for p in papers], normalize_embeddings=True)
+        model = _get_model()        # 懒加载模型
+        vecs = model.encode([_paper_text(p) for p in papers], normalize_embeddings=True)     # 向量化所有论文
     except Exception as e:
         log.warning("论文相关性检查失败，按相关放行（模型没装或没网络？）：%s", e)
         return True, ""
@@ -63,11 +63,11 @@ def check_paper_relevance(papers: list[PaperSource]) -> tuple[bool, str]:
     pairs = []
     for i in range(n):
         for j in range(i + 1, n):
-            sim = float((vecs[i] * vecs[j]).sum())
-            pairs.append((sim, i, j))
-
-    avg_sim = sum(p[0] for p in pairs) / len(pairs)
-    if avg_sim >= _RELEVANT_THRESHOLD:
+            sim = float((vecs[i] * vecs[j]).sum())     # 计算每对论文的余弦相似度
+            pairs.append((sim, i, j))                  # 记录每对论文的相似度、索引
+ 
+    avg_sim = sum(p[0] for p in pairs) / len(pairs)     # 计算所有论文对的平均相似度
+    if avg_sim >= _RELEVANT_THRESHOLD:                  # 平均相似度够高 → 主题接近，正常走流程
         return True, ""  # 平均相似度够高 → 主题接近，正常走流程
 
     # 低相关：把低于阈值的论文对挑出来，按相似度从低到高写进说明，提示用户做决定

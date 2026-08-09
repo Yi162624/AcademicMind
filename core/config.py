@@ -60,5 +60,10 @@ if not QWEN_VL.api_key:
 # ═══════ 预算与路径 ═══════
 DAILY_BUDGET = float(_read("DAILY_BUDGET", "20"))       # 每日预算上限（元）
 MONTHLY_BUDGET = float(_read("MONTHLY_BUDGET", "200"))  # 每月预算上限（元）
-DATA_DIR = _read("DATA_DIR", "data")                    # SQLite / Milvus 数据目录
-CACHE_DIR = _read("CACHE_DIR", "data/cache")            # 检索/解析结果缓存目录
+
+# 项目根目录：用 __file__ 推导（config.py 在 core/ 下，上一级就是项目根），
+# 这样不管从哪个目录启动程序，数据/缓存都固定落在项目根下，不会因为 cwd 不同而散落各处
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+DATA_DIR = _read("DATA_DIR", os.path.join(_PROJECT_ROOT, "data"))  # SQLite / Milvus 数据目录（.env 可覆盖为绝对路径）
+CACHE_DIR = _read("CACHE_DIR", os.path.join(_PROJECT_ROOT, "data", "cache"))  # 检索/解析结果缓存目录（.env 可覆盖为绝对路径）

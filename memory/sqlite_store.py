@@ -10,7 +10,7 @@ from datetime import datetime
 
 from core.config import DATA_DIR
 from core.logger import get_logger
-from core.schemas import PaperAnalysis, TaskRecord, UserConfig
+from core.schemas import ImageItem, MODE_SURVEY, PaperAnalysis, TaskRecord, UserConfig
 
 log = get_logger("sqlite_store")  # 本模块日志器
 
@@ -57,6 +57,17 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             accepted     INTEGER NOT NULL DEFAULT 0,
             created_at   TEXT NOT NULL DEFAULT ''
         );
+
+        -- 图片记忆表：一张图一行，存图片档案 + pHash（去重用）
+        -- pHash 存 hex 字符串（64位感知哈希），去重时全量拉出算汉明距离
+        CREATE TABLE IF NOT EXISTS image (
+            image_id    TEXT PRIMARY KEY,   -- 图片编号（没给就用 URL 当主键）
+            url         TEXT NOT NULL DEFAULT '',
+            description TEXT NOT NULL DEFAULT '',
+            source      TEXT NOT NULL DEFAULT '',
+            subtopic    TEXT NOT NULL DEFAULT '',
+            phash       TEXT NOT NULL DEFAULT ''   -- pHash hex 字符串（64位感知哈希），去重用
+        );
     """)
     conn.commit()
 
@@ -81,11 +92,16 @@ def get_user_config() -> UserConfig:
         conn.close()            # 关闭数据库连接
     if row is None:
         return UserConfig()     # 没记录 → 默认 survey 模式，前端照常用
-    return UserConfig(preferred_mode=row[0], theme=row[1])
+    # 数据库里的模式值做一次校验：只认 survey/paper，脏数据回退默认，别让前端拿到非法值
+    mode = row[0] if row[0] in ("survey", "paper") else MODE_SURVEY
+    return UserConfig(preferred_mode=mode, theme=row[1])
 
 
 def save_user_config(preferred_mode: str) -> None:
     """保存模式偏好：本地固定一行，不区分用户（前端切换模式时调用，下次进页面自动恢复）"""
+    # 模式值先校验：只认 survey/paper，非法值回退默认，别把脏数据写进库里（和读端 get_user_config 对称）
+    if preferred_mode not in ("survey", "paper"):
+        preferred_mode = MODE_SURVEY
     conn = _connect()
     try:
         conn.execute(
@@ -100,6 +116,18 @@ def save_user_config(preferred_mode: str) -> None:
 
 # ═══════════ 单篇精读历史 ═══════════
 
+def _clean_identifier(raw: str) -> str:
+    """清洗从链接里抠出来的指纹：去掉尾部的多余字符（斜杠/.pdf/排版标点），
+    保证和 PDF 解析出的干净 ID 完全一致，同一篇论文不会记成两条"""
+    s = raw.strip()
+    if not s:
+        return raw                         # 清洗完变空就返回原样，别把指纹洗没了
+    s = s.rstrip("/")                      # 去掉尾部斜杠：abs/2301.12345/ → 2301.12345
+    if s.lower().endswith(".pdf"):
+        s = s[:-4]                         # 去掉尾部 .pdf：pdf/2301.12345v2.pdf → 2301.12345v2
+    return s.rstrip(".,;:()】）")           # 去掉尾部排版标点：doi 链接尾的句号/逗号等
+
+
 def make_paper_key(title: str, link: str = "", arxiv_id: str = "") -> str:
     """给论文生成唯一标识：优先论文指纹（arXiv ID/DOI），其次链接，最后标题。
     目的是同一篇论文无论从链接进来还是 PDF 进来，标识都一样，不会记成两条"""
@@ -110,25 +138,29 @@ def make_paper_key(title: str, link: str = "", arxiv_id: str = "") -> str:
     if link:
         m = re.search(r"arxiv\.org/(?:abs|pdf)/([\w.\-/]+)", link)
         if m:
-            return f"arxiv:{m.group(1)}"   # 链接里的 arXiv ID
+            return f"arxiv:{_clean_identifier(m.group(1))}"   # 链接里的 arXiv ID（清洗尾部多余字符）
         m = re.search(r"doi\.org/([\w.\-/]+)", link)
         if m:
-            return f"doi:{m.group(1)}"     # 链接里的 DOI
+            # DOI 大小写不敏感（ISO 标准），统一转小写，避免同一 DOI 记成两条
+            return f"doi:{_clean_identifier(m.group(1)).lower()}"     # 链接里的 DOI（清洗尾部多余字符）
         return link.strip()                # 没有指纹，直接拿链接当标识
     return title.strip()                   # 纯 PDF 且没解析出指纹，用标题兜底
 
 
 def save_paper_analysis(rec: PaperAnalysis) -> None:
     """记录单篇精读结果（单篇 skill 分析完调用）；同一篇论文再分析会覆盖，保持最新"""
-    if not rec.created_at:
-        rec.created_at = datetime.now().isoformat(timespec="seconds")  # 没传时间就填当前时间
+    # 论文指纹是主键必须有值：没有说明调用方漏了 make_paper_key，直接报错尽早暴露（fail fast）
+    if not rec.paper_key:
+        raise ValueError("paper_key 不能为空：请先用 make_paper_key 生成论文指纹")
+    # 没传时间就填当前时间（只算个局部变量，不写回入参，别污染调用方的对象）
+    created_at = rec.created_at or datetime.now().isoformat(timespec="seconds")
     conn = _connect()
     try:
         conn.execute(
             "INSERT INTO paper_analysis (paper_key, paper_title, link, summary, created_at) VALUES (?, ?, ?, ?, ?) "
             "ON CONFLICT(paper_key) DO UPDATE SET "
             "paper_title = excluded.paper_title, link = excluded.link, summary = excluded.summary, created_at = excluded.created_at",
-            (rec.paper_key, rec.paper_title, rec.link, rec.summary, rec.created_at),
+            (rec.paper_key, rec.paper_title, rec.link, rec.summary, created_at),
         )
         conn.commit()
     finally:
@@ -164,6 +196,76 @@ def save_task_log(rec: TaskRecord) -> None:
             (rec.task_id, rec.mode, rec.question, rec.duration_sec,
              rec.token_usage, rec.cost, int(rec.accepted), rec.created_at),
         )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ═══════════ 图片记忆（pHash 去重）═══════════
+
+def _hamming_distance(hex1: str, hex2: str) -> int:
+    """算两个 pHash（hex 字符串）的汉明距离：异或后数 1 的个数。
+    两个 64 位哈希完全相同距离为 0，完全不同最大为 64"""
+    if not hex1 or not hex2:
+        return 64  # 有空值就当完全不同，不误判为重复
+    try:
+        # 两个 hex 先转整数再异或，数 1 的个数就是汉明距离
+        return bin(int(hex1, 16) ^ int(hex2, 16)).count("1")
+    except ValueError:
+        # 传进来的不是合法 hex（脏数据/上游异常），当完全不同处理，别让去重流程崩掉
+        return 64
+
+
+def save_image(item: ImageItem) -> None:
+    """存一张图片档案（含 pHash）；同一 image_id 重复存会覆盖（去重更新常用）"""
+    conn = _connect()
+    try:
+        conn.execute(
+            "INSERT INTO image (image_id, url, description, source, subtopic, phash) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(image_id) DO UPDATE SET "
+            "url = excluded.url, description = excluded.description, "
+            "source = excluded.source, subtopic = excluded.subtopic, phash = excluded.phash",
+            (item.image_id or item.url, item.url, item.description,
+             item.source, item.subtopic, item.phash),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def image_exists(image_id: str) -> bool:
+    """按 image_id 精确查图片在不在库里（第一级去重：快速预筛同 ID 重复）"""
+    conn = _connect()
+    try:
+        row = conn.execute("SELECT 1 FROM image WHERE image_id = ?", (image_id,)).fetchone()
+    finally:
+        conn.close()
+    return row is not None
+
+
+def image_exists_by_phash(phash: str, threshold: int = 5) -> bool:
+    """按 pHash 汉明距离查图片是否已存在（第二级去重：防同图不同 ID）。
+    遍历所有 phash，汉明距离 ≤ threshold 就算重复。
+    threshold=5 是社区默认值：只抓几乎完全一样的图，不误杀相似但不同的图"""
+    if not phash:
+        return False  # 没 pHash 就没法判重，放行让调用方决定
+    conn = _connect()
+    try:
+        rows = conn.execute("SELECT phash FROM image WHERE phash != ''").fetchall()
+    finally:
+        conn.close()
+    for (stored_phash,) in rows:
+        if _hamming_distance(phash, stored_phash) <= threshold:
+            return True  # 找到一张汉明距离够近的，判重复
+    return False
+
+
+def delete_image(image_id: str) -> None:
+    """按 image_id 删一张图片档案（换图/清理不用了的图片）"""
+    conn = _connect()
+    try:
+        conn.execute("DELETE FROM image WHERE image_id = ?", (image_id,))
         conn.commit()
     finally:
         conn.close()
