@@ -233,7 +233,7 @@ def _get_graph():
     """拿编译好的状态机（懒加载：第一次调用才构建，agent 没实现时也允许 import main）"""
     global _GRAPH
     if _GRAPH is None:
-        _GRAPH = _build_graph()
+        _GRAPH = _build_graph()        # 编译状态机，只在第一次调用时构建
     return _GRAPH
 
 
@@ -258,12 +258,11 @@ def _log_task(flow: FlowState, duration_sec: float) -> None:
     try:
         from memory.sqlite_store import save_task_log   # memory 是本人负责的模块
         save_task_log(TaskRecord(
-            task_id=uuid.uuid4().hex,
-            mode=flow.mode,
-            question=flow.question,
-            duration_sec=round(duration_sec, 2),
-            created_at=datetime.now().isoformat(timespec="seconds"),
-            # token_usage/cost 默认 0：等 agent 把 token 用量汇到 flow 里再填
+            task_id=uuid.uuid4().hex,              # 每次任务一个唯一 ID，方便查询
+            mode=flow.mode,                        # 模式（survey/paper）
+            question=flow.question,                # 研究问题（调研模式必填）
+            duration_sec=round(duration_sec, 2),   # 任务耗时（秒）
+            created_at=datetime.now().isoformat(timespec="seconds"),  # 记录时间（秒级精度）
         ))
     except Exception as e:
         log.warning("任务日志写入失败（不影响主流程）：%s", e)

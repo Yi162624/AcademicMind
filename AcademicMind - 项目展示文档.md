@@ -45,7 +45,7 @@
 
 - `memory_survey/`（Milvus Lite 向量集合）—— 调研模式：研究主题、报告摘要向量
 - `memory_paper/`（Milvus Lite 向量集合）—— 论文模式：分析过的论文列表、综述结果
-- `user_config.db`（SQLite）—— 用户配置（含模式偏好）、单篇精读历史、图片记忆（pHash 去重），独立存放，不属于任何单一模式
+- `user_config.db`（SQLite）—— 用户配置（含模式偏好）、单篇精读历史、图片记忆（pHash 去重 + 描述向量），独立存放，不属于任何单一模式
 
 ### 2.2 系统架构
 
@@ -65,7 +65,8 @@ main.py（系统入口，按输入自动分流）
                 │              │          │         │          │
                 └──────────────┴──────────┴─────────┴──────────┘
                              调用支撑模块
-multimodal/   图片上传/提取 → Qwen2.5-VL-7B API（图表理解）
+multimodal/   图片上传/提取 → Qwen2.5-VL-7B API 理解 → pHash 去重 → 视觉工作记忆
+              （SQLite image 表 + BGE 描述向量；配图时混合检索 + VLM 图文匹配精排）
 memory/       SQLite：模式偏好 + 单篇精读历史 + 图片记忆（pHash 去重）；Milvus Lite：向量记忆（调研+论文历史）
 skills/       论文精读 skill（单篇论文八段式精读）
 evaluation/   RAGAS 质量评估
@@ -157,7 +158,7 @@ core/logger.py   统一日志出口（控制台 + data/logs/app.log 文件）
 | 用户输入 | 一个研究问题 | 1 篇或多篇论文（链接或 PDF） |
 | Planner 拆解 | 3 个子主题 + 每章图片需求 | 多篇：分析维度（方法/实验/结果/局限/结论）+ 论文分组；单篇：无 |
 | Researcher 搜集 | 并行搜文本 + 图片素材 | 多篇：按组读论文、提炼要点；单篇：由 skill 直接深读 |
-| 图片检索 | 有（SQLite pHash 去重已实现；视觉工作记忆规划中） | 有（PDF 提取图表页 → API 理解，规划中） |
+| 图片检索 | 有（视觉工作记忆：pHash 去重 + Qwen2.5-VL 理解 + BGE 描述向量混合检索 + VLM 图文匹配精排） | 有（PDF 提取图表页 → API 理解，规划中）**——注意：论文模式的图不作为报告配图，只用于"看懂图表内容"并转成文字证据（如从柱状图提取准确率数据），报告本身是纯文字** |
 | 报告形态 | 图文交错 HTML 报告 | 单篇：八段式精读报告（skill）；多篇：对比综述报告（5 Agent） |
 | Verifier 检查 | 事实/引用/图文一致性 | 多篇：分析忠实度/引用真实性（跳过图文一致性）；单篇：无（skill 直出） |
 | Advisor 建议 | 3 个研究方向 + 5 篇核心论文 + 行动清单 | 多篇：推荐论文 + 下一步行动建议；单篇：复现/延伸建议 |
@@ -180,9 +181,11 @@ core/logger.py   统一日志出口（控制台 + data/logs/app.log 文件）
 - 每个研究员同时搜集文本证据 + 图片素材
 - 文本来源：arXiv API、Semantic Scholar API
 - **文本去重（规划中）**：Researcher 返回的证据在写入共享状态前，先经过轻量 embedding 模型（BGE-small，~100MB，CPU 运行）计算语义相似度，自动合并高度重复的文本片段，避免 Writer 整合时的冗余引用；当前 BGE-small 已落地于论文相关性检查（见 2.3），证据去重待迭代
-- 图片素材（规划中）：存入"视觉工作记忆"（图片 + 来源 + 描述 + pHash）
+- 图片素材：存入"视觉工作记忆"（ImageItem：图片 + 来源 + 描述 + 子主题 + pHash + 描述向量）
+- 图片来源：当前仅支持网页图片（http/https URL，httpx 直接下载）。**将来做论文模式（Docling 提取 PDF 图表）时**需补两个能力：① 视觉工作记忆加 `add_local_image` 本地入口（读文件代替下载）；② SQLite `image` 表加 `img_type` 字段（`web`/`local`，标记图片来源），让 Writer 知道本地图该怎么渲染、怎么标引用（参考已有先例：image 表加过 image_embedding 列），此改动留到论文模式一并实现
 - 图片去重：图片先算 pHash（感知哈希），再用汉明距离阈值去重（SQLite `image` 表，阈值≤5），避免同一图片重复出现
-- 图片理解（规划中）：通过 Qwen2.5-VL-7B API 生成图片描述，作为证据的一部分
+- 图片理解：通过 Qwen2.5-VL-7B API 生成图片描述（"视觉解说词"），作为证据的一部分
+- 图文检索：Writer 配图时按"召回 → 过滤 → 精排"三步取图——① 按子主题/关键词从 SQLite 过滤召回；② 用 BGE-small 把"图片描述向量"和"章节图片需求"算余弦相似度排序，**相似度低于 0.5 的图直接淘汰**（参考论文相关性检查的 0.6 阈值与社区 BGE 常用值，此处因后面有 VLM 精排兜底取宽松值，只拦"明显不相关"的图），再取 Top-K 张；③ 将候选图 + 章节文字发给 Qwen2.5-VL 做图文匹配精排（三维度都满足才算匹配：主题相关/类型合适/信息增量），拦截"长得像但语义不符"的图，返回精排通过的图片素材；**若精排后无图通过（或召回为空），则该章不配图，纯文字输出**
 
 **第 3 步：写作者整合生成**
 - 综合所有证据，生成图文交错的 HTML 报告
@@ -283,7 +286,7 @@ Planner 拆解维度与分组 → 用户确认 → N×Researcher 并行分析 �
 **向量记忆层（Milvus Lite）**：
 - 调研模式：将"研究主题 embedding + 完整报告摘要"存入 `memory_survey`，支持用户**手动检索**历史调研记录
 - 论文模式：将"论文主题 embedding + 分析结论"存入 `memory_paper`，支持用户**手动检索**历史分析记录
-- 图片记忆：调研模式检索到的图片存入 SQLite `image` 表（含 pHash），用于去重和复用
+- 图片记忆：调研模式检索到的图片存入 SQLite `image` 表（含 pHash 与描述向量），用于去重、复用和向量检索
 - 注：向量记忆仅用于历史记录的存储与检索，**不主动注入当前任务的 Prompt**
 
 ### 4.2 任务元数据记录
@@ -329,6 +332,7 @@ Planner 拆解维度与分组 → 用户确认 → N×Researcher 并行分析 �
 | **视觉理解** | **Qwen2.5-VL-7B-Instruct API（图片/图表理解）** |
 | 文本去重（规划中） | BGE-small 轻量 embedding（文本语义去重，CPU 运行）|
 | 图片去重 | pHash 感知哈希（汉明距离≤5，SQLite 存储）|
+| 图文检索 | BGE-small 描述向量（复用论文相关性检查的模型，CPU 运行）+ SQLite 子主题/关键词过滤 + Qwen2.5-VL 图文匹配精排 |
 | 编程语言 | Python |
 
 > **注**：本地不部署任何 LLM/VLM，所有模型能力通过 HTTP API 调用。本地仅运行前端、记忆模块、PDF 解析与缓存。
@@ -357,9 +361,9 @@ AcademicMind/
 │   ├── milvus_lite_store.py    # Milvus Lite：向量记忆（调研+论文历史）
 │   └── paper_relevance.py      # BGE 论文相关性检查（论文分析模式 ≥2 篇时用）
 ├── multimodal/         # 多模态模块：图片处理与 API 视觉理解（规划中）
-│   ├── visual_retrieval.py     # SQLite pHash 图片去重与检索
-│   ├── visual_working_memory.py # 视觉工作记忆（去重 + 来源管理）
-│   └── image_understanding.py  # 图片理解：调用 Qwen2.5-VL-7B API
+│   ├── visual_working_memory.py # 视觉工作记忆：pHash 去重 + 描述生成 + 入库
+│   ├── image_understanding.py  # 图片理解：调用 Qwen2.5-VL-7B API（描述生成 + 图文匹配判断）
+│   └── visual_retrieval.py     # 图文检索：子主题/关键词过滤 + BGE 描述向量排序 + VLM 精排
 ├── skills/             # 独立能力模块（即插即用，不依赖多Agent流程）（规划中）
 │   └── paper_deep_read/        # 论文精读 skill：单篇论文八段式精读
 │       ├── SKILL.md            # skill 说明：作用、输入输出、提示词模板
@@ -454,6 +458,7 @@ AcademicMind/
 3. **统一 PDF 解析策略**：所有输入（arXiv 链接 / PDF / URL）统一转 PDF，Docling 一体化解析（文本 + 表格 + 图片）+ Qwen2.5-VL API 理解图表，兼顾速度与质量
 4. **SQLite + Milvus Lite 分层存储**：结构化数据与向量数据各司其职，本地部署零外部依赖（除 API 外）
 5. **统一模型 + 角色 Prompt**：所有 Agent 共用 DeepSeek-V4-Flash，通过 system prompt 区分角色，成本与复杂度最低
+6. **图片素材三层防线**：pHash 去重 → 子主题/关键词 + BGE 描述向量混合检索 → Qwen2.5-VL 图文匹配精排，避免"图长得像但语义不符"的素材混入报告
 
 ---
 

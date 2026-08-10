@@ -61,14 +61,19 @@ def _init_tables(conn: sqlite3.Connection) -> None:
         -- 图片记忆表：一张图一行，存图片档案 + pHash（去重用）
         -- pHash 存 hex 字符串（64位感知哈希），去重时全量拉出算汉明距离
         CREATE TABLE IF NOT EXISTS image (
-            image_id    TEXT PRIMARY KEY,   -- 图片编号（没给就用 URL 当主键）
-            url         TEXT NOT NULL DEFAULT '',
-            description TEXT NOT NULL DEFAULT '',
-            source      TEXT NOT NULL DEFAULT '',
-            subtopic    TEXT NOT NULL DEFAULT '',
-            phash       TEXT NOT NULL DEFAULT ''   -- pHash hex 字符串（64位感知哈希），去重用
+            image_id        TEXT PRIMARY KEY,   -- 图片编号（没给就用 URL 当主键）
+            url             TEXT NOT NULL DEFAULT '',
+            description     TEXT NOT NULL DEFAULT '',
+            source          TEXT NOT NULL DEFAULT '',
+            subtopic        TEXT NOT NULL DEFAULT '',
+            phash           TEXT NOT NULL DEFAULT '',   -- pHash hex 字符串（64位感知哈希），去重用
+            image_embedding TEXT NOT NULL DEFAULT ''    -- 描述向量（JSON 字符串），图文检索的"意思"匹配用
         );
     """)
+    # 老库升级：image 表没有 image_embedding 列就补上（新库建表已含，重复执行不报错）
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(image)")}
+    if "image_embedding" not in cols:
+        conn.execute("ALTER TABLE image ADD COLUMN image_embedding TEXT NOT NULL DEFAULT ''")
     conn.commit()
 
 
@@ -217,21 +222,48 @@ def _hamming_distance(hex1: str, hex2: str) -> int:
 
 
 def save_image(item: ImageItem) -> None:
-    """存一张图片档案（含 pHash）；同一 image_id 重复存会覆盖（去重更新常用）"""
+    """存一张图片档案（含 pHash 和描述向量）；同一 image_id 重复存会覆盖（去重更新常用）"""
     conn = _connect()
     try:
         conn.execute(
-            "INSERT INTO image (image_id, url, description, source, subtopic, phash) "
-            "VALUES (?, ?, ?, ?, ?, ?) "
+            "INSERT INTO image (image_id, url, description, source, subtopic, phash, image_embedding) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(image_id) DO UPDATE SET "
             "url = excluded.url, description = excluded.description, "
-            "source = excluded.source, subtopic = excluded.subtopic, phash = excluded.phash",
+            "source = excluded.source, subtopic = excluded.subtopic, "
+            "phash = excluded.phash, image_embedding = excluded.image_embedding",
             (item.image_id or item.url, item.url, item.description,
-             item.source, item.subtopic, item.phash),
+             item.source, item.subtopic, item.phash, item.embedding),
         )
         conn.commit()
     finally:
         conn.close()
+
+
+def list_images(subtopic: str = "", keyword: str = "") -> list[ImageItem]:
+    """按子主题/关键词拉图片清单（图文检索的"召回"阶段用）：
+    传 subtopic 就只挑该子主题的图；传 keyword 就在描述里模糊搜；
+    都不传就返回全部图片（调研图量小，全量拉出算相似度毫秒级，不用分页）"""
+    conn = _connect()
+    try:
+        sql = "SELECT image_id, url, description, source, subtopic, phash, image_embedding FROM image WHERE 1=1"
+        params: list[str] = []
+        if subtopic:
+            sql += " AND subtopic = ?"     # 子主题精确匹配（图登记时贴的标签）
+            params.append(subtopic)
+        if keyword:
+            sql += " AND description LIKE ?"   # 关键词在描述里模糊搜（兜底召回）
+            params.append(f"%{keyword}%")
+        rows = conn.execute(sql + " ORDER BY image_id", params).fetchall()
+    finally:
+        conn.close()
+    return [
+        ImageItem(
+            image_id=row[0], url=row[1], description=row[2],
+            source=row[3], subtopic=row[4], phash=row[5], embedding=row[6],
+        )
+        for row in rows
+    ]
 
 
 def image_exists(image_id: str) -> bool:

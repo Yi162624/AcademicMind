@@ -5,33 +5,14 @@
 #       平均相似度低于阈值就判"低相关"，并把差异大的论文对写进说明文字
 # 位置：memory/paper_relevance.py，被 main.py 的 check_relevance_node 调用
 
-import threading
-
 from core.logger import get_logger
 from core.schemas import PaperSource
+from memory.embedding import _get_model  # 复用公共 BGE 封装，不在本模块重复加载模型
 
 log = get_logger("paper_relevance")  # 本模块日志器
 
-# BGE 小模型：中英文都认，CPU 就能跑，约 100MB（首次使用自动下载）
-_MODEL_NAME = "BAAI/bge-small-zh-v1.5"
-
 # 相似度阈值：论文两两平均相似度低于它就判"低相关"
 _RELEVANT_THRESHOLD = 0.6
-
-_model = None                   # 全局缓存模型，整个进程只加载一次
-_model_lock = threading.Lock()  # 防止多线程同时去加载模型（双检查锁）
-
-
-def _get_model():
-    """拿 BGE 模型（懒加载：第一次调用才加载，之后复用同一个，别重复下模型）"""
-    global _model
-    if _model is None:
-        with _model_lock:
-            if _model is None:
-                # 延迟 import：没装 sentence-transformers 时，只影响相关性检查，不拖累别的模块
-                from sentence_transformers import SentenceTransformer
-                _model = SentenceTransformer(_MODEL_NAME)
-    return _model
 
 
 def _paper_text(p: PaperSource) -> str:

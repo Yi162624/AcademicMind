@@ -81,6 +81,7 @@ class ImageItem:
     subtopic: str = ""          # 属于哪个子主题
     image_id: str = ""          # 图片唯一编号（报告里引用图片用）
     phash: str = ""             # 图片感知哈希（hex 字符串，64位），pHash 去重用
+    embedding: str = ""         # 描述向量（JSON 字符串），图文检索的"意思"匹配用
 
 
 @dataclass
