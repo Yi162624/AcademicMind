@@ -145,28 +145,66 @@ class Suggestion:
 # 7 单篇精读 skill（paper_deep_read）产出
 # ═══════════════════════════════════════
 @dataclass
+class PaperInfo:
+    """论文元信息：标题/作者/年份/机构/链接（单篇精读用，替代裸 dict）"""
+    title: str = ""               # 论文标题
+    authors: str = ""             # 所有作者（逗号分隔）
+    year: str = ""                # 发表年份
+    link: str = ""                # 论文链接或标识
+
+
+@dataclass
 class DeepReadStage1:
-    """单篇精读阶段1产出：从论文里提取的关键结构化信息（中间JSON，不直接给用户）"""
-    paper_info: dict[str, str]                              # 论文信息：标题/作者/机构/年份/链接
-    summary: str = ""                                       # 一句话总结
-    contributions: list[str] = field(default_factory=list)  # 核心贡献（2-3个创新点）
-    method: str = ""                                        # 方法拆解（技术路线/模型架构）
-    experiments: list[str] = field(default_factory=list)    # 实验分析（数据集/基准/结果/消融）
-    limitations: list[str] = field(default_factory=list)    # 局限性
-    figure_notes: list[str] = field(default_factory=list)   # 图表理解描述（Qwen-VL 生成的图表说明）
+    """单篇精读阶段1产出：从论文里提取的关键结构化信息（中间JSON，不直接给用户）
+    v2 新增字段：支持分层信息路由和事实核查"""
+    paper_info: PaperInfo = field(default_factory=PaperInfo)  # 论文元信息
+    one_line_summary: str = ""                                # 一句话总结
+    # ── v2 分层 problem 区块 ──
+    problem_background: str = ""                              # 问题背景（旧方法怎么做的 + 有什么问题 + 为什么重要）
+    problem_old_methods: list[str] = field(default_factory=list)      # [v2] 旧方法列表
+    problem_old_method_problems: list[str] = field(default_factory=list) # [v2] 旧方法的具体问题
+    problem_paper_examples: list[str] = field(default_factory=list)   # [v2] 论文中的问题示例
+    # ── v2 分层 core_idea 区块 ──
+    core_idea: str = ""                                       # 核心洞察（大白话：作者想通了什么）
+    core_idea_changed_assumption: str = ""                     # [v2] 打破了什么旧假设
+    core_idea_paper_evidence: str = ""                         # [v2] 论文原文依据
+    concept_explanations: list[str] = field(default_factory=list)  # 核心概念大白话解释
+    # ── v2 分层 method 区块 ──
+    method: str = ""                                          # 方法全景（结构 + 模块 + 公式直觉）
+    method_key_formulas: list[dict] = field(default_factory=list)  # [v2] 关键公式 [{formula, meaning}]
+    paper_innovations: list[str] = field(default_factory=list)    # 创新点（列表，每条大白话解释）
+    experiments: list[str] = field(default_factory=list)      # 实验分析
+    limitations: list[str] = field(default_factory=list)      # 局限性
+    analogies: list[str] = field(default_factory=list)        # 生活类比素材
+    example_sentences: list[str] = field(default_factory=list)    # 论文中的具体例句
+    key_quotes: list[str] = field(default_factory=list)       # 论文原文关键句
+    # ── v2 分层 impact 区块 ──
+    scenario: str = ""                                        # 适用场景与评价
+    impact_paper_claim: str = ""                               # [v2] 论文自己的贡献声明
+    related_directions: list[str] = field(default_factory=list) # 关联研究方向
+    reading_guide: str = ""                                   # 重点阅读指引
+    figure_notes: list[str] = field(default_factory=list)     # 图表理解描述
 
 
 @dataclass
 class DeepReadReport:
-    """单篇精读最终产出：八段式精读报告（阶段2基于阶段1的JSON生成）"""
-    paper_info: dict[str, str]                              # 1 论文信息：标题/作者/机构/年份/链接
-    one_line_summary: str = ""                              # 2 一句话总结
-    contributions: list[str] = field(default_factory=list)  # 3 核心贡献
-    method: str = ""                                        # 4 方法拆解
-    experiments: list[str] = field(default_factory=list)    # 5 实验分析
-    limitations: list[str] = field(default_factory=list)    # 6 局限性
-    scenario: str = ""                                      # 7 适用场景与一句话评价
-    related_directions: list[str] = field(default_factory=list)  # 8 关联推荐（相关研究方向）
+    """单篇精读最终产出：大白话教学式精读报告
+    v3：full_report 是完整动态叙事 Markdown（真正给小白看的主报告）；
+    其余固定字段保留用于兼容 main.py / test_single.py 的结构化读取"""
+    paper_info: PaperInfo = field(default_factory=PaperInfo)     # 1 论文元信息
+    one_line_summary: str = ""                                   # 2 一句话看懂
+    problem_background: str = ""                                 # 3 为什么要研究这个问题
+    core_idea: str = ""                                          # 4 核心思想（作者想通了什么）
+    concept_explanations: list[str] = field(default_factory=list)  # 5 核心概念大白话解释
+    method: str = ""                                             # 6 方法全景
+    paper_innovations: list[str] = field(default_factory=list)   # 7 创新点为什么聪明
+    experiments: list[str] = field(default_factory=list)         # 8 实验证明了什么
+    limitations: list[str] = field(default_factory=list)         # 9 不足与局限
+    scenario: str = ""                                           # 10 贡献与影响
+    related_directions: list[str] = field(default_factory=list)  # （暂不展示）
+    reading_guide: str = ""                                      # 11 重点阅读指引
+    full_report: str = ""                                        # [v3] 完整动态叙事报告（主产物）
+    verification_notes: str = ""                                 # [v3] Stage4 审核说明（事实/逻辑/教学检查结论）
 
 
 # ═══════════════════════════════════════

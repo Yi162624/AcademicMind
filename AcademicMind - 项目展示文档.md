@@ -21,7 +21,7 @@
 | 模式 | 用户输入 | 系统输出 |
 | :--- | :--- | :--- |
 | **领域调研** | 一个研究问题（如"大模型在医疗影像的应用"） | ① 图文并茂的领域调研报告 ② 3 个值得深入研究的方向建议 ③ 5 篇最值得精读的核心论文清单 |
-| **论文分析** | 1 篇或多篇论文（链接或 PDF） | 单篇：八段式精读报告；多篇：① 综述分析报告（方法/实验/结果/局限/结论） ② 论文间对比与关联 ③ 推荐精读论文 + 下一步行动建议 |
+| **论文分析** | 1 篇或多篇论文（链接或 PDF） | 单篇：标准化精读报告（8 章，面向小白）；多篇：① 综述分析报告（方法/实验/结果/局限/结论） ② 论文间对比与关联 ③ 推荐精读论文 + 下一步行动建议 |
 
 > ⚠️ **使用建议**：论文分析模式建议**一次性上传所有相关论文**（≥1 篇）。系统会自动判断：仅 1 篇时走单篇精读 skill，≥2 篇时走多篇对比 5 Agent 流程。分批上传的论文暂不支持跨 session 自动关联。
 
@@ -68,13 +68,13 @@ main.py（系统入口，按输入自动分流）
 multimodal/   图片上传/提取 → Qwen2.5-VL-7B API 理解 → pHash 去重 → 视觉工作记忆
               （SQLite image 表 + BGE 描述向量；配图时混合检索 + VLM 图文匹配精排）
 memory/       SQLite：模式偏好 + 单篇精读历史 + 图片记忆（pHash 去重）；Milvus Lite：向量记忆（调研+论文历史）
-skills/       论文精读 skill（单篇论文八段式精读）
+skills/       论文精读 skill（单篇论文标准化精读报告）
 evaluation/   RAGAS 质量评估
 core/schemas.py  数据契约（Outline/Evidence/Report/Suggestion 贯穿全程）
 core/logger.py   统一日志出口（控制台 + data/logs/app.log 文件）
 
 模型调用层：
-- 所有文本 Agent 通过统一 HTTP Client 调用 DeepSeek-V4-Flash API
+- 所有文本 Agent 通过统一 HTTP Client 调用 DeepSeek-V4-Pro API
 - 图片/图表理解通过独立 HTTP Client 调用 Qwen2.5-VL-7B-Instruct API
 - 本地不加载任何模型权重
 ```
@@ -159,9 +159,9 @@ core/logger.py   统一日志出口（控制台 + data/logs/app.log 文件）
 | Planner 拆解 | 3 个子主题 + 每章图片需求 | 多篇：分析维度（方法/实验/结果/局限/结论）+ 论文分组；单篇：无 |
 | Researcher 搜集 | 并行搜文本 + 图片素材 | 多篇：按组读论文、提炼要点；单篇：由 skill 直接深读 |
 | 图片检索 | 有（视觉工作记忆：pHash 去重 + Qwen2.5-VL 理解 + BGE 描述向量混合检索 + VLM 图文匹配精排） | 有（PDF 提取图表页 → API 理解，规划中）**——注意：论文模式的图不作为报告配图，只用于"看懂图表内容"并转成文字证据（如从柱状图提取准确率数据），报告本身是纯文字** |
-| 报告形态 | 图文交错 HTML 报告 | 单篇：八段式精读报告（skill）；多篇：对比综述报告（5 Agent） |
+| 报告形态 | 图文交错 HTML 报告 | 单篇：标准化精读报告（8 章，skill）；多篇：对比综述报告（5 Agent） |
 | Verifier 检查 | 事实/引用/图文一致性 | 多篇：分析忠实度/引用真实性（跳过图文一致性）；单篇：无（skill 直出） |
-| Advisor 建议 | 3 个研究方向 + 5 篇核心论文 + 行动清单 | 多篇：推荐论文 + 下一步行动建议；单篇：复现/延伸建议 |
+| Advisor 建议 | 3 个研究方向 + 5 篇核心论文 + 行动清单 | 多篇：推荐论文 + 下一步行动建议；单篇：无（报告内置"给科研小白的建议"章节，由 skill 生成） |
 
 ### 3.1 任务一：领域调研
 
@@ -209,36 +209,37 @@ core/logger.py   统一日志出口（控制台 + data/logs/app.log 文件）
 用户输入论文 → 判断论文数量 → 1篇：单篇精读 skill；≥2篇：5 Agent 对比流程
 ```
 
-#### 3.2.1 单篇精读（skill 能力模块，规划中）
+#### 3.2.1 单篇精读（skill 能力模块，已实现）
 
 输入固定、步骤固定、输出结构化，由一个 skill 直接完成，不经过多 Agent 协作：
 
 ```
-论文输入 → 智能解析分流 → 深读拆解（两阶段 LLM 调用） → 输出八段式精读报告
+论文输入 → 解析分流 → PDF 解析 → 图表理解 → 五阶段深读 → 标准化精读报告
 ```
 
-**智能解析分流**：
-- 所有输入（arXiv 链接 / PDF 文件 / 其他链接）**统一走 PDF 解析流程**
-- arXiv 链接：先通过官方 API 解析出 PDF 地址，再走 PDF 解析
-- PDF 解析策略：Docling 统一解析（文本 + 表格 + 图片页），表格可直接输出为 HTML/CSV
+**解析阶段（确定性工程，代码完成）**：
+- 输入分流：arXiv 链接先经官方 API 解析出 PDF 地址；PDF 文件/其他链接直接下载
+- PDF 解析：Docling 统一解析（文本 + 表格 + 图片页）
+- 图表理解：Docling 提取的图表通过 Qwen2.5-VL-7B API 生成文字描述，与正文一起送入后续分析
 
-**图表理解**：
-- Docling 提取出的图表/图片，通过 Qwen2.5-VL-7B API 生成结构化描述
-- 图表描述与正文文本一起送入 LLM 分析
+**五阶段 LLM 深读**（代码编排 + AI 生成，避免单次长上下文注意力衰减）：
+- **Stage0 结构地图**：识别论文类型（AI/CS、实验研究、质性研究、系统综述）+ 章节结构
+- **Stage1 推理知识库**：提取核心概念、方法设计、实验推理、创新点、局限（分"作者承认"+"未提及"两类）
+- **Stage2 教学规划**：面向小白规划报告章节大纲
+- **Stage3 并行分章**：每章独立生成教学叙事，并行加速
+- **Stage4 定点修正**：检查事实/逻辑/教学，失败自动重试
 
-**两阶段 LLM 调用**（避免单次长上下文注意力衰减）：
-- **阶段 1**：提取关键结构化信息（方法/实验/结果/局限）→ 输出中间 JSON
-- **阶段 2**：基于中间 JSON 生成八段式精读报告 → 输出最终 Markdown
+**标准化精读报告（8 章，面向科研小白）**：
+1. 研究背景与动机 (Why this paper?)
+2. 核心思想与贡献 (What's new?)
+3. 关键技术详解 (How it works?)
+4. 核心公式 (Key Formulas)
+5. 实验验证 (Does it work?)
+6. 局限性与影响 (Limitations & Impact)
+7. 总结与展望 (Summary)
+8. 给科研小白的建议 (For Beginners)
 
-**精读报告八段式**：
-1. 论文信息（标题/作者/机构/年份/链接）
-2. 一句话总结
-3. 核心贡献（2-3 个创新点）
-4. 方法拆解（技术路线/模型架构）
-5. 实验分析（数据集/基准/结果/消融实验）
-6. 局限性
-7. 适用场景与一句话评价
-8. 关联推荐（相关研究方向）
+报告开头含元信息头（标题/作者/会议/年份/日期），内容用大白话类比讲解，公式点到为止，局限只保留关键 2-3 条。
 
 #### 3.2.2 多篇对比（5 Agent 流程）
 
@@ -328,7 +329,7 @@ Planner 拆解维度与分组 → 用户确认 → N×Researcher 并行分析 �
 | PDF 解析 | Docling（IBM 开源，文本 + 表格 + 图片一体化解析）|
 | 输入兼容 | arXiv 链接 / PDF 文件 / 其他链接，统一转 PDF 解析（Docling）|
 | 质量评估 | RAGAS（文本指标）+ 简易图文一致性检查 |
-| **大语言模型** | **DeepSeek-V4-Flash API（所有文本 Agent 共用）** |
+| **大语言模型** | **DeepSeek-V4-Pro API（所有文本 Agent 共用）** |
 | **视觉理解** | **Qwen2.5-VL-7B-Instruct API（图片/图表理解）** |
 | 文本去重（规划中） | BGE-small 轻量 embedding（文本语义去重，CPU 运行）|
 | 图片去重 | pHash 感知哈希（汉明距离≤5，SQLite 存储）|
@@ -364,10 +365,11 @@ AcademicMind/
 │   ├── visual_working_memory.py # 视觉工作记忆：pHash 去重 + 描述生成 + 入库
 │   ├── image_understanding.py  # 图片理解：调用 Qwen2.5-VL-7B API（描述生成 + 图文匹配判断）
 │   └── visual_retrieval.py     # 图文检索：子主题/关键词过滤 + BGE 描述向量排序 + VLM 精排
-├── skills/             # 独立能力模块（即插即用，不依赖多Agent流程）（规划中）
-│   └── paper_deep_read/        # 论文精读 skill：单篇论文八段式精读
-│       ├── SKILL.md            # skill 说明：作用、输入输出、提示词模板
-│       └── skill.py            # 实现：智能解析 → 两阶段深读 → 输出八段式报告
+├── skills/             # 独立能力模块（即插即用，不依赖多Agent流程）
+│   └── paper_deep_read/        # 论文精读 skill：单篇论文标准化精读报告
+│       ├── SKILL.md            # skill 说明：name/description/工作流/输出契约
+│       ├── skill.py            # 实现：解析 + 图表理解 + 五阶段深读 + 报告输出
+│       └── prompts.py          # 五阶段提示词模板（与代码分离，便于单独调优）
 ├── frontend/           # 前端界面（Streamlit）（规划中）
 ├── evaluation/         # 评估模块（RAGAS）（规划中）
 └── requirements.txt    # 依赖清单
@@ -381,7 +383,7 @@ AcademicMind/
 | :--- | :--- | :--- |
 | 第 1 周 | LangGraph 多 Agent 骨架 + main.py 编排 + SQLite/Milvus Lite 记忆模块 | 5 个 Agent 状态机跑通（含 Verifier 回退逻辑 + HUMAN_IN_LOOP），SQLite 配置读写正常，Milvus Lite 向量存储正常 |
 | 第 2 周 | 接入 arXiv API + Semantic Scholar API + DeepSeek API + Qwen-VL API | Researcher 能返回结构化检索结果，API 调用稳定，错误降级策略生效，成本估算准确 |
-| 第 3 周 | PDF 解析方案落地（Docling）+ 论文精读 skill | 单篇论文能输出八段式精读报告，arXiv 链接可自动转 PDF 解析，图表页通过 API 理解 |
+| 第 3 周 | PDF 解析方案落地（Docling）+ 论文精读 skill | 单篇论文能输出标准化 8 章精读报告，arXiv 链接可自动转 PDF 解析，图表页通过 API 理解 |
 | 第 4 周 | Milvus Lite 图文检索整合 + 行动建议 Agent + 单篇精读历史记录 | 研究员能返回图片并通过 API 理解，行动建议 Agent 能生成 3 个方向建议，单篇精读完成后可存入精读历史、按 PDF/链接搜索历史精读记录 |
 | 第 5 周 | 验证员接入 RAGAS + 全流程联调 + 评估数据收集 | 完整闭环跑通，输出图文报告+建议+论文清单，有初步评估数据 |
 | 第 6 周 | API 压力测试 + 成本优化 + 视频录制 | 全链路在 API 模式下稳定运行，单任务成本可控，录制演示视频 |
@@ -410,7 +412,7 @@ AcademicMind/
 | 4 | core/schemas.py | 数据契约：全项目统一的数据结构定义 | 先定稿，后续模块按此对接 |
 | 5 | main.py | 系统入口：任务分流 + LangGraph 状态机编排（含 HUMAN_IN_LOOP） | 依赖 logger、config、llm_client、schemas |
 | 6 | memory/ | SQLite：模式偏好、单篇精读历史、任务日志、图片记忆（pHash）；Milvus Lite：向量记忆 | 独立模块，先跑通数据存取 |
-| 7 | skills/ | 论文精读 skill：单篇论文智能解析 + 两阶段深读 + 八段式报告 | 独立能力模块，按 schemas 契约实现 |
+| 7 | skills/ | 论文精读 skill：单篇论文智能解析 + 五阶段深读 + 标准化 8 章报告 | 独立能力模块，按 schemas 契约实现 |
 | 8 | multimodal/ | SQLite pHash 图片去重、视觉工作记忆、Qwen-VL API 调用 | 依赖记忆库的数据结构；为 Researcher/Writer 提供检索接口 |
 | 9 | frontend/ | Streamlit 界面：模式切换 + 提问入口 + 报告展示 + HUMAN_IN_LOOP 交互 | 依赖 main.py 的完整流程与数据结构 |
 | 10 | evaluation/ | RAGAS 评估：检索相关性、答案忠实度、简易图文一致性 | 最后接入，验证全链路输出质量 |
@@ -423,16 +425,16 @@ AcademicMind/
 
 | 环节 | 模型 | 说明 |
 | :--- | :--- | :--- |
-| Planner / Advisor | DeepSeek-V4-Flash | 任务简单，成本低，推理能力强 |
-| Researcher | DeepSeek-V4-Flash | 检索总结与格式化 |
-| Writer / Verifier | DeepSeek-V4-Flash | 质量要求高，长文本生成与检查 |
+| Planner / Advisor | DeepSeek-V4-Pro | 任务简单，成本低，推理能力强 |
+| Researcher | DeepSeek-V4-Pro | 检索总结与格式化 |
+| Writer / Verifier | DeepSeek-V4-Pro | 质量要求高，长文本生成与检查 |
 | 视觉理解 | Qwen2.5-VL-7B-Instruct API | 图表/文档理解，性价比极高 |
 
 ### 10.2 生产/比赛阶段
 
 | 环节 | 模型 | 说明 |
 | :--- | :--- | :--- |
-| 所有文本 Agent | DeepSeek-V4-Flash API | 统一入口，通过 system prompt 区分角色 |
+| 所有文本 Agent | DeepSeek-V4-Pro API | 统一入口，通过 system prompt 区分角色 |
 | 图片/图表理解 | Qwen2.5-VL-7B-Instruct API | 学术论文图表、表格、公式识别 |
 | PDF 解析 | Docling（本地）| 解析全文文本、表格与图片，仅本地轻量模型 |
 
@@ -440,12 +442,12 @@ AcademicMind/
 
 | 模式 | 文本 Token 消耗 | 图片数量 | 预估成本 |
 | :--- | :--- | :--- | :--- |
-| 论文模式（单篇精读）| ~5K-15K | 3-8 张 | ~¥0.1-0.5 |
+| 论文模式（单篇精读）| ~200K-250K | 3-8 张 | ~¥0.2-0.5 |
 | 论文模式（多篇对比，5篇）| ~20K-50K | 15-30 张 | ~¥0.5-2.5 |
 | 调研模式 | ~30K-80K | 10-20 张 | ~¥1-3 |
 
-> 以上按 2026-07 官方价估算：DeepSeek-V4-Flash 输入 1 元/输出 2 元（每百万 token，平峰、未命中缓存）；Qwen2.5-VL-7B 输入 2 元/输出 5 元。
-> DeepSeek-V4-Flash 与 Qwen2.5-VL-7B API 价格均处于行业低位，单次任务成本可控。开发阶段可设置每日/每月预算上限防止超额。
+> 以上按 2026-07 官方价估算（当前代码 llm_client._PRICE 沿用 DeepSeek-V4-Flash 单价：输入 1 元/输出 2 元，每百万 token、平峰、未命中缓存）；Qwen2.5-VL-7B 输入 2 元/输出 5 元。DeepSeek-V4-Pro 实际单价可能更高，需按官方报价同步更新 llm_client._PRICE。
+> DeepSeek-V4-Pro 与 Qwen2.5-VL-7B API 价格均处于行业低位，单次任务成本可控。开发阶段可设置每日/每月预算上限防止超额。
 
 **缓存策略**：Researcher 的检索结果和 PDF 解析结果本地缓存，避免重复调用 API 或重复解析。
 
@@ -457,7 +459,7 @@ AcademicMind/
 2. **纯 API 架构**：本地零模型负担，8GB 显存即可运行，比赛/部署不受硬件限制
 3. **统一 PDF 解析策略**：所有输入（arXiv 链接 / PDF / URL）统一转 PDF，Docling 一体化解析（文本 + 表格 + 图片）+ Qwen2.5-VL API 理解图表，兼顾速度与质量
 4. **SQLite + Milvus Lite 分层存储**：结构化数据与向量数据各司其职，本地部署零外部依赖（除 API 外）
-5. **统一模型 + 角色 Prompt**：所有 Agent 共用 DeepSeek-V4-Flash，通过 system prompt 区分角色，成本与复杂度最低
+5. **统一模型 + 角色 Prompt**：所有 Agent 共用 DeepSeek-V4-Pro，通过 system prompt 区分角色，成本与复杂度最低
 6. **图片素材三层防线**：pHash 去重 → 子主题/关键词 + BGE 描述向量混合检索 → Qwen2.5-VL 图文匹配精排，避免"图长得像但语义不符"的素材混入报告
 
 ---
