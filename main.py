@@ -15,6 +15,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from core.logger import get_logger
+from core.llm_client import get_session_usage, reset_session_usage
 from core.schemas import (
     FinalResult,
     FlowState,
@@ -57,6 +58,16 @@ def _outline_to_dict(outline) -> dict:
         "image_requirements": outline.image_requirements,     # 每章需要什么图
         "analysis_dimensions": outline.analysis_dimensions,   # 分析维度（论文模式用）
         "paper_assignments": outline.paper_assignments,       # 论文分组（论文模式用）
+        "research_tasks": [                              # 研究任务单（研究员工作依据，展示给用户确认）
+            {
+                "id": t.id,                              # 任务编号（T1/T2...）
+                "question": t.question,                  # 要回答什么
+                "purpose": t.purpose,                    # 为什么研究
+                "required_evidence": t.required_evidence,  # 需要什么证据
+                "target_sections": t.target_sections,    # 服务哪几章
+            }
+            for t in outline.research_tasks
+        ],
     }
 
 
@@ -253,15 +264,18 @@ def _run_deep_read(paper: PaperSource, config: dict) -> tuple[dict, FinalResult]
 
 
 def _log_task(flow: FlowState, duration_sec: float) -> None:
-    """记一次任务日志（文档 4.2）：耗时/模式/问题写进 SQLite task_log 表。
+    """记一次任务日志（文档 4.2）：耗时/模式/问题/token/花费写进 SQLite task_log 表。
     非关键路径：memory 模块没实现或写库失败都不影响主流程，只记个 warning"""
     try:
         from memory.sqlite_store import save_task_log   # memory 是本人负责的模块
+        in_tokens, out_tokens, cost = get_session_usage()   # 会话累计的 token/花费（llm_client 自动累加）
         save_task_log(TaskRecord(
             task_id=uuid.uuid4().hex,              # 每次任务一个唯一 ID，方便查询
             mode=flow.mode,                        # 模式（survey/paper）
             question=flow.question,                # 研究问题（调研模式必填）
             duration_sec=round(duration_sec, 2),   # 任务耗时（秒）
+            token_usage=in_tokens + out_tokens,    # 总 token 消耗（输入+输出）
+            cost=cost,                             # 预估花费（元）
             created_at=datetime.now().isoformat(timespec="seconds"),  # 记录时间（秒级精度）
         ))
     except Exception as e:
@@ -278,6 +292,7 @@ def run_task(mode: str = MODE_SURVEY, question: str = "", papers: list[PaperSour
     papers = papers or []
     thread_id = thread_id or uuid.uuid4().hex   # 每次任务一个会话号，挂起恢复都靠它
     config = {"configurable": {"thread_id": thread_id}}
+    reset_session_usage()   # 新任务开始，清空会话消耗计数（挂起/恢复不重置，继续累计）
 
     if mode == MODE_PAPER:
         if not papers:

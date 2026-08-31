@@ -1,4 +1,4 @@
-# AcademicMind 依赖清单（Python >= 3.10），安装：pip install -r requirements.txt
+# AcademicMind 依赖清单（Python >= 3.13），安装：pip install -r requirements.txt
 # 完整复现（含精确版本）用 environment.yml：conda env create -f environment.yml
 langgraph>=0.2.28           # 多智能体框架（interrupt()/Command 需要较新版本）
 streamlit>=1.36.0            # 前端界面

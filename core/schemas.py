@@ -8,8 +8,8 @@
 #
 # ── 结构清单（按流程顺序）──
 #   1 用户输入          → PaperSource（论文分析模式用）
-#   2 Planner 产出      → Outline（大纲，调研/分析两种模式字段分开）
-#   3 Researcher 产出   → Evidence（文本 TextEvidence + 图片 ImageItem）
+#   2 Planner 产出      → Outline（大纲 + research_tasks 研究任务单）
+#   3 Researcher 产出   → Evidence（结构化证据：findings + claims + sources）
 #   4 Verifier 产出     → VerifierResult（整体结论）+ Issue（问题清单）
 #   5 Writer 产出       → Report（报告，带上 outline 供验证员核对）
 #   6 Advisor 产出      → Suggestion（含 Paper 论文）
@@ -45,31 +45,55 @@ class PaperSource:
 
 
 # ═══════════════════════════════════════
-# 2 Planner（规划师）产出：研究大纲
+# 2 Planner（规划师）产出：研究任务单 + 研究大纲
 # ═══════════════════════════════════════
+@dataclass
+class ResearchTask:
+    """规划师给研究员下达的"研究任务单"：研究员据此知道"搜什么、为什么、要什么证据、服务哪章"。
+    id 由 Python 系统分配（T1/T2...），不信任 LLM 自己生成的编号"""
+    id: str                                      # 任务编号（系统分配 T1/T2/T3）
+    question: str                                # 研究员要回答的研究问题（搜索依据）
+    purpose: str = ""                            # 研究目的（为什么研究，筛选证据的标准）
+    required_evidence: list[str] = field(default_factory=list)  # 需要什么类型的证据
+    target_sections: list[str] = field(default_factory=list)    # 这些证据服务报告哪几章
+
+
 @dataclass
 class Outline:
     """规划师产出：研究大纲（调研/分析两种模式共用，按模式用对应字段）"""
     mode: str                                   # 任务模式：MODE_SURVEY / MODE_PAPER
     question: str                               # 用户原始问题（两种模式都要）
     # 调研模式（survey）用：
-    subtopics: list[str] = field(default_factory=list)          # 默认 3 个子主题（研究员分活用）
+    subtopics: list[str] = field(default_factory=list)          # 默认 3 个子主题（兼容字段，研究员分活用）
     sections: list[str] = field(default_factory=list)           # 报告章节标题（写作者排版用）
     image_requirements: list[str] = field(default_factory=list) # 每章需要的图片类型（研究员找图用）
     # 论文分析模式（paper）用：
     analysis_dimensions: list[str] = field(default_factory=list)     # 每篇论文要分析哪些方面（方法/实验/结论...）
     paper_assignments: list[list[str]] = field(default_factory=list) # 论文怎么分组（每组一个研究员，存论文标题）
+    # 新增核心字段：研究任务单（研究员真正的工作依据，两种模式共用）
+    research_tasks: list[ResearchTask] = field(default_factory=list) # 规划师拆出的研究任务（驱动研究员干活）
 
 
 # ═══════════════════════════════════════
-# 3 Researcher（研究员）产出：图文证据
+# 3 Researcher（研究员）产出：结构化证据（Source / Claim / Evidence）
 # ═══════════════════════════════════════
 @dataclass
-class TextEvidence:
-    """文本证据，带来源链接（验证员靠它查引用真假）"""
-    content: str                # 证据正文
-    source: str                 # 来源链接或出处
-    subtopic: str = ""          # 属于哪个子主题/分组
+class Source:
+    """证据的来源论文（可追溯链的最底层）。id 由系统全局分配（S1/S2...）"""
+    id: str                      # 来源编号（系统分配 S1/S2/S3）
+    title: str                   # 论文标题
+    authors: str = ""            # 作者
+    year: str = ""               # 发表年份
+    link: str = ""               # 论文链接
+    abstract: str = ""           # 摘要原文（Verifier 追溯用）
+
+
+@dataclass
+class Claim:
+    """一条可追溯论断：claim → evidence_text → source_id，形成"谁说的、原文是什么、来自哪"这条链"""
+    claim: str                   # 论断（这句话说了什么）
+    source_id: str = ""          # 指向哪个 Source.id
+    evidence_text: str = ""      # 支撑该论断的原文证据（论文摘要里的原文）
 
 
 @dataclass
@@ -86,10 +110,15 @@ class ImageItem:
 
 @dataclass
 class Evidence:
-    """一个研究员产出：某个子主题/论文分组的证据"""
-    subtopic: str                                   # 调研模式=子主题名；分析模式=论文分组名
-    texts: list[TextEvidence] = field(default_factory=list)  # 文本证据（分析模式下 source 即论文链接）
-    images: list[ImageItem] = field(default_factory=list)    # 图片素材（分析模式通常为空）
+    """研究员围绕一个 ResearchTask 产出的结构化证据包。
+    注意：Evidence 不是"一篇论文"，而是"针对某个任务整理出的一组证据"。
+    evidence_id 由系统全局分配（E1/E2...），Writer 只能引用、不能自造编号"""
+    task_id: str                                    # 属于哪个 ResearchTask.id（把证据和任务挂钩）
+    evidence_id: str = ""                           # 证据编号（系统分配 E1/E2/E3）
+    findings: list[str] = field(default_factory=list)    # 研究发现（综合结论，回答 task.question）
+    claims: list[Claim] = field(default_factory=list)    # 可追溯论断（claim → source）
+    sources: list[Source] = field(default_factory=list)  # 来源论文（最底层，供追溯）
+    images: list[ImageItem] = field(default_factory=list)  # 图片素材（分析模式通常为空）
 
 
 # ═══════════════════════════════════════

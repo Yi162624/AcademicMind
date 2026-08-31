@@ -18,6 +18,7 @@ from typing import Optional
 import httpx
 
 from core.config import CACHE_DIR
+from core.json_utils import parse_json
 from core.llm_client import chat, vision
 from core.logger import get_logger
 from core.schemas import DeepReadReport, PaperInfo, PaperSource
@@ -286,41 +287,6 @@ def _understand_figures(figure_paths: list[str]) -> list[str]:
     return notes
 
 
-def _parse_json(text: str) -> Optional[dict]:
-    """把 LLM 返回的文本解析成 JSON dict。
-    LLM 输出经常不干净（代码块包裹、前后夹废话、尾逗号），这里做多层清洗，
-    尽量把"近似 JSON"救回来，实在不行才返回 None"""
-    if not text:
-        return None
-    text = text.strip()
-
-    # 第一层：剥掉 markdown 代码块（处理 ```json ... ``` 或 ``` ... ```）
-    # 用 find 定位 ```，而不是假设它一定在开头/结尾
-    fence = text.find("```")
-    if fence != -1:
-        text = text[fence + 3:]                              # 从 ``` 之后开始截
-        text = re.sub(r"^[a-zA-Z]+\s*\n", "", text, count=1)  # 去掉 "json" 这类语言标记
-        end = text.rfind("```")                              # 去掉结尾的 ```
-        if end != -1:
-            text = text[:end]
-        text = text.strip()
-
-    # 第二层：截取第一个 { 到最后一个 } 之间的内容（应对 LLM 前后夹带的解释文字）
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        text = text[start:end + 1]
-
-    # 第三层：去掉尾逗号（JSON 标准不允许 {..,} 或 [..,]）
-    text = re.sub(r",\s*([}\]])", r"\1", text)
-
-    # 第四层：直接解析，失败返回 None
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return None
-
-
 def _join_figure_notes(figure_notes: list[str]) -> str:
     """把图表理解描述拼成一段文本，没图就返回占位说明"""
     return "\n".join(figure_notes) if figure_notes else "（本论文未提供图表或图表无法提取）"
@@ -343,7 +309,7 @@ def _stage0_structure_map(full_text: str, figure_notes: list[str]) -> dict:
                 user=prompt,
                 max_tokens=8192,
             )
-            data = _parse_json(resp.text)
+            data = parse_json(resp.text)
             if data is not None:
                 log.info("Stage0 结构地图完成：%d 个章节", len(data.get("sections", [])))
                 return data
@@ -372,7 +338,7 @@ def _stage1_reasoning_extract(full_text: str, figure_notes: list[str], structure
             user=prompt,
             max_tokens=65536,  # 推理知识库字段多，留够空间避免长 JSON 截断
         )
-        data = _parse_json(resp.text)
+        data = parse_json(resp.text)
         if data is None:
             # JSON 解析失败：先压缩原文再重试（更短的输入更可能输出合法 JSON）
             if retry_count >= 3:
@@ -428,7 +394,7 @@ def _stage2_planner(stage1: dict) -> Optional[dict]:
                 user=prompt,
                 max_tokens=8192,
             )
-            data = _parse_json(resp.text)
+            data = parse_json(resp.text)
             if data is not None:
                 log.info("Stage2 教学规划完成：%d 个章节", len(data.get("sections", [])))
                 return data
@@ -532,7 +498,7 @@ def _stage4_editor(stage1: dict, plan: dict, sections: list[dict]) -> Optional[d
                 user=prompt,
                 max_tokens=16384,
             )
-            data = _parse_json(resp.text)
+            data = parse_json(resp.text)
             if data is not None:
                 issues = data.get("issues", [])
                 revised = data.get("revised_sections", [])

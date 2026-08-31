@@ -20,6 +20,25 @@ _PRICE = {
     "qwen_vl": (2.0, 5.0),
 }
 
+# ── 会话级消耗累加器 ──
+# 作用：记录"一次任务从头到尾"调了多少 token、花了多少钱。
+#       5 个 Agent 各自调 chat()/vision()，这里统一累计，跨挂起/恢复也持续累加，
+#       任务结束写任务日志时一次性读取，不需要 Agent 层回传。
+_SESSION_INPUT_TOKENS = 0    # 会话累计输入 token
+_SESSION_OUTPUT_TOKENS = 0   # 会话累计输出 token
+_SESSION_COST = 0.0          # 会话累计花费（元）
+
+
+def reset_session_usage() -> None:
+    """清空会话消耗计数：启动新任务时调用（单篇精读/多 Agent 流程都从这里开始）"""
+    global _SESSION_INPUT_TOKENS, _SESSION_OUTPUT_TOKENS, _SESSION_COST
+    _SESSION_INPUT_TOKENS = _SESSION_OUTPUT_TOKENS = _SESSION_COST = 0
+
+
+def get_session_usage() -> tuple[int, int, float]:
+    """取会话累计消耗 (输入 token, 输出 token, 花费元)：任务结束写日志用"""
+    return _SESSION_INPUT_TOKENS, _SESSION_OUTPUT_TOKENS, round(_SESSION_COST, 4)
+
 
 @dataclass
 class LLMResponse:
@@ -28,6 +47,14 @@ class LLMResponse:
     input_tokens: int      # 输入 token 数
     output_tokens: int     # 输出 token 数
     cost: float            # 预估花费（元）
+
+
+def _accumulate(resp: LLMResponse) -> None:
+    """把一次模型调用的消耗累加到会话计数（chat/vision 每次返回前都调）"""
+    global _SESSION_INPUT_TOKENS, _SESSION_OUTPUT_TOKENS, _SESSION_COST
+    _SESSION_INPUT_TOKENS += resp.input_tokens
+    _SESSION_OUTPUT_TOKENS += resp.output_tokens
+    _SESSION_COST += resp.cost
 
 
 def estimate_cost(input_tokens: int, output_tokens: int, model: str = "deepseek") -> float:
@@ -50,7 +77,9 @@ def chat(system: str, user: str, max_tokens: int | None = None) -> LLMResponse:
     }
     data = _post(url, payload, DEEPSEEK.api_key, DEEPSEEK.timeout)  # 发 POST 请求
     log.debug("DeepSeek 文本调用返回 token 用量：%s", data["usage"])   # 记录 token 用量
-    return _to_response(data, "deepseek")             # 解析返回数据
+    resp = _to_response(data, "deepseek")             # 解析返回数据
+    _accumulate(resp)                                  # 累加到会话消耗（写任务日志用）
+    return resp
 
 
 def vision(image: str, prompt: str) -> LLMResponse:
@@ -66,7 +95,9 @@ def vision(image: str, prompt: str) -> LLMResponse:
         "max_tokens": QWEN_VL.max_tokens,
     }
     data = _post(url, payload, QWEN_VL.api_key, QWEN_VL.timeout)
-    return _to_response(data, "qwen_vl")
+    resp = _to_response(data, "qwen_vl")
+    _accumulate(resp)                                  # 累加到会话消耗（写任务日志用）
+    return resp
 
 
 def _post(url: str, payload: dict, api_key: str, timeout: float) -> dict:
