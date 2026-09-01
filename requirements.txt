@@ -8,7 +8,6 @@ arxiv>=2.1.0                 # arXiv API
 pandas>=2.0.0                # 数据处理
 sentence-transformers>=3.0.0 # BGE-small 文本/图片描述向量（模型权重首次用需下载）
 docling>=2.0.0               # PDF 解析（含本地小模型，较重）
-ragas>=0.2.0                 # 质量评估
 python-dotenv>=1.0.0         # 读 .env 配置
 imagehash>=4.3.0             # 图片感知哈希（pHash 去重）
 Pillow>=10.0.0               # 图片处理（imagehash 依赖）

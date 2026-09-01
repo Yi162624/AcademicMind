@@ -37,7 +37,16 @@
 
 ### 2.1 前端交互设计
 
-**模式切换按钮**：页面**左上角**设置常驻模式按钮（🔍 调研模式 / 📄 论文模式），用户可随时一键切换。
+**前端形态**：React（Vite）+ FastAPI API 网关（frontend/server.py），**对话式交互**——用户像聊天一样输入研究问题或论文链接，AI 以消息流形式返回大纲确认、相关性提示、报告复核和最终结果（已实现）。
+
+**模式切换**：页面**侧边栏**常驻模式按钮（🔍 调研模式 / 📄 论文模式），一键切换；**研究进行中锁定切换**（running 时禁用按钮，防止对话状态串扰）。
+
+**双模式独立会话**：调研/论文两种模式**各自独立的对话历史**（前端按模式分开存储），互不干扰、互不串数据；切换模式只切"显示哪一份"，历史都在。
+
+**意图分类三层分流**（用户输入先分类再路由）：
+- `simple`（问候/常识小问题）→ AI 直接答（一次 LLM 调用，秒回）
+- `research`（学术调研/论文分析）→ 走 5 Agent 流程
+- `other`（复杂但非学术，如编程/生活问题）→ 礼貌拒答并说明原因
 
 **模式状态持久化**：用户选择的模式写入 **SQLite 用户配置表**（本地单例，固定一行，不区分用户），每次进入页面自动恢复上次使用过的模式，无需重复选择；用户切换模式后配置同步更新，下次打开仍是新选的模式。
 
@@ -53,7 +62,11 @@
 用户
  │
  ▼
-Streamlit 前端（frontend/）── 左上角模式按钮（读 SQLite 配置，恢复上次模式）
+React 前端（frontend/web/，Vite dev :5173，对话式交互）
+ │  ① POST /api/classify 意图分类（simple/research/other 三层分流）
+ │  ② POST /api/task/start / resume
+ ▼
+FastAPI API 网关（frontend/server.py，:8000，包装 run_task/resume_task）
  │  输入
  ▼
 main.py（系统入口，按输入自动分流）
@@ -69,7 +82,6 @@ multimodal/   图片上传/提取 → Qwen3-VL-Plus API 理解 → pHash 去重 
               （SQLite image 表 + BGE 描述向量；配图时混合检索 + VLM 图文匹配精排）
 memory/       SQLite：模式偏好 + 单篇精读历史 + 图片记忆（pHash 去重）；Milvus Lite：向量记忆（调研+论文历史）
 skills/       论文精读 skill（单篇论文标准化精读报告）
-evaluation/   RAGAS 质量评估
 core/schemas.py  数据契约（ResearchTask 研究任务单 + Evidence 证据链 + Outline/Report/Suggestion 贯穿全程）
 core/logger.py   统一日志出口（控制台 + data/logs/app.log 文件）
 
@@ -135,7 +147,7 @@ core/logger.py   统一日志出口（控制台 + data/logs/app.log 文件）
 
 **人类在环（HUMAN_IN_LOOP）**：系统在以下情况下暂停自动流程，交给用户决定：
 1. **论文相关性提示（仅低相关时）**：论文分析模式 ≥2 篇且相关性检查判定论文差异大时暂停，告诉用户哪些论文主题差异较大，用户选择 [继续生成报告（对比仅供参考）] 或 [取消，分开分析]
-2. **大纲确认（必经环节）**：规划师生成大纲后即暂停，通过 Streamlit 前端展示大纲（子主题/章节/图片需求）和**研究任务单**（每个任务：要回答什么问题、为什么研究、需要什么证据、服务报告哪一章），用户选择 [接受并使用] 或 [输入修改意见]；用户认可后流程才继续，可反复调整
+2. **大纲确认（必经环节）**：规划师生成大纲后即暂停，通过 React 前端展示大纲（子主题/章节/图片需求）和**研究任务单**（每个任务：要回答什么问题、为什么研究、需要什么证据、服务报告哪一章），用户选择 [接受并使用] 或 [输入修改意见]；用户认可后流程才继续，可反复调整
 3. **报告复核（兜底）**：报告校验失败且 `report_retry_count == 1` 时暂停，向用户展示未通过的具体检查项（如"第2章引用无法验证"）和两个按钮：**[接受当前版本并继续]** / **[输入修改意见]**；用户输入意见后，将意见写入 `verifier_feedback`，AI 按意见修改后重新校验（最多再 1 次，仍不过则再次进入人工复核）
 
 **状态字段**：
@@ -181,6 +193,7 @@ core/logger.py   统一日志出口（控制台 + data/logs/app.log 文件）
 - 3 个研究员分别负责一个研究任务（ResearchTask，planner 产出）
 - **搜索词精炼**：研究员先把任务问题交给 LLM 压成 1-2 条短英文关键词（arXiv 不认整句中文长问题），LLM 失败时本地兜底提取关键词
 - 文本来源：arXiv API、Semantic Scholar API（429 限流时指数退避重试 + 随机抖动错峰）
+- **摘要获取分层策略**：论文模式补摘要时——① 用户给的链接含 arXiv ID/DOI → 直接按 ID 走官方取数接口（arXiv `id_list` / S2 `paper/{id}`），不触发搜索限流；② 无 ID 的纯标题 → LLM 精炼成英文关键词再搜（arXiv 优先，S2 限流即放弃）；③ 结果按链接缓存（`_META_CACHE`），重复分析零成本（详见 Bug修复记录 #8，提速约 20 倍）
 - **证据提炼（核心）**：搜到候选论文后，研究员让 LLM 提炼成结构化证据——findings（综合结论，回答任务问题）+ claims（可追溯论断，claim→evidence_text→source）+ sources（来源论文，系统分配 S 编号）；不是把摘要原样丢给 Writer
 - **文本去重（规划中）**：Researcher 返回的证据在写入共享状态前，先经过轻量 embedding 模型（BGE-small，~100MB，CPU 运行）计算语义相似度，自动合并高度重复的文本片段，避免 Writer 整合时的冗余引用；当前 BGE-small 已落地于论文相关性检查（见 2.3），证据去重待迭代
 - 图片素材：存入"视觉工作记忆"（ImageItem：图片 + 来源 + 描述 + 子主题 + pHash + 描述向量）
@@ -317,17 +330,9 @@ Planner 拆解维度与分组 → 用户确认 → N×Researcher 并行分析 �
 
 ---
 
-## 五、评估与验证
+## 五、场景对比验证
 
-### 5.1 技术指标（用 RAGAS 自动评估）
-
-| 指标 | 说明 |
-| :--- | :--- |
-| 检索相关性 | 找到的证据和问题相关吗？ |
-| 答案忠实度 | 报告内容忠于证据吗？ |
-| 图文一致性 | 图片和文字匹配吗？（仅调研模式评估；采用 VLM API + 描述向量相似度辅助 + 人工抽检） |
-
-### 5.2 场景指标（对比测试）
+### 5.1 场景指标（对比测试）
 
 | 对比项 | 传统方式 | AcademicMind |
 | :--- | :--- | :--- |
@@ -341,13 +346,13 @@ Planner 拆解维度与分组 → 用户确认 → N×Researcher 并行分析 �
 | 模块 | 技术选型 |
 | :--- | :--- |
 | 多智能体框架 | LangGraph |
-| 前端界面 | Streamlit（极简，模式切换 + 输入 + 结果展示）|
+| 前端界面 | React（Vite）+ 自定义 CSS，对话式交互；FastAPI API 网关（frontend/server.py） |
+| 意图分类 | DeepSeek-V4-Pro 轻量调用（simple 直接答 / research 走调研 / other 礼貌拒答） |
 | 数据源 | arXiv API + Semantic Scholar API（Researcher 先精炼搜索词再搜，429 限流指数退避重试） |
 | 向量记忆 | Milvus Lite（嵌入式向量数据库）|
 | 结构化存储 | SQLite（模式偏好、单篇精读历史、任务元数据、图片记忆 pHash 去重）|
 | PDF 解析 | Docling（IBM 开源，文本 + 表格 + 图片一体化解析）|
 | 输入兼容 | arXiv 链接 / PDF 文件 / 其他链接，统一转 PDF 解析（Docling）|
-| 质量评估 | RAGAS（文本指标）+ 简易图文一致性检查 |
 | **大语言模型** | **DeepSeek-V4-Pro API（所有文本 Agent 共用）** |
 | **视觉理解** | **Qwen3-VL-Plus API（图片/图表理解）** |
 | 文本去重（规划中） | BGE-small 轻量 embedding（文本语义去重，CPU 运行）|
@@ -389,8 +394,9 @@ AcademicMind/
 │       ├── SKILL.md            # skill 说明：name/description/工作流/输出契约
 │       ├── skill.py            # 实现：解析 + 图表理解 + 五阶段深读 + 报告输出
 │       └── prompts.py          # 五阶段提示词模板（与代码分离，便于单独调优）
-├── frontend/           # 前端界面（Streamlit）（规划中）
-├── evaluation/         # 评估模块（RAGAS）（规划中）
+├── frontend/           # 前端：FastAPI API 网关（server.py）+ React 对话式界面（web/）
+│   ├── server.py       # API 网关：包装 run_task/resume_task，意图分类/简单直答/PDF上传
+│   └── web/            # React 前端（Vite）：对话流 + 双模式独立会话 + HIL 确认卡片
 └── requirements.txt    # 依赖清单
 ```
 
@@ -404,7 +410,7 @@ AcademicMind/
 | 第 2 周 | 接入 arXiv API + Semantic Scholar API + DeepSeek API + Qwen-VL API | Researcher 能返回结构化检索结果，API 调用稳定，错误降级策略生效，成本估算准确 |
 | 第 3 周 | PDF 解析方案落地（Docling）+ 论文精读 skill | 单篇论文能输出标准化 8 章精读报告，arXiv 链接可自动转 PDF 解析，图表页通过 API 理解 |
 | 第 4 周 | Milvus Lite 图文检索整合 + 行动建议 Agent + 单篇精读历史记录 | 研究员能返回图片并通过 API 理解，行动建议 Agent 能生成 3 个方向建议，单篇精读完成后可存入精读历史、按 PDF/链接搜索历史精读记录 |
-| 第 5 周 | 验证员接入 RAGAS + 全流程联调 + 评估数据收集 | 完整闭环跑通，输出图文报告+建议+论文清单，有初步评估数据 |
+| 第 5 周 | 全流程联调 + 数据收集 | 完整闭环跑通，输出图文报告+建议+论文清单，有初步数据 |
 | 第 6 周 | API 压力测试 + 成本优化 + 视频录制 | 全链路在 API 模式下稳定运行，单任务成本可控，录制演示视频 |
 
 ---
@@ -416,12 +422,12 @@ AcademicMind/
 | 分工 | 覆盖模块 |
 | :--- | :--- |
 | 搭档负责 | agent/ 目录：planner、researcher、writer、verifier、advisor + main.py 编排 |
-| 本人负责 | memory/（SQLite + Milvus Lite）、multimodal/、skills/、evaluation/、llm_client.py |
-| 共建 | frontend/（Streamlit 极简界面，两人联调）|
+| 本人负责 | memory/（SQLite + Milvus Lite）、multimodal/、skills/、llm_client.py |
+| 共建 | frontend/（FastAPI API 网关 + React 对话式界面，两人联调）|
 
 ### 9.2 开发顺序（依赖关系）
 
-按依赖顺序推进：`core/logger.py → core/config.py → core/llm_client.py → core/schemas.py → main.py → memory → skills → multimodal → frontend → evaluation`
+按依赖顺序推进：`core/logger.py → core/config.py → core/llm_client.py → core/schemas.py → main.py → memory → skills → multimodal → frontend`
 
 | 顺序 | 模块 | 职责说明 | 为什么排这个位置 |
 | :--- | :--- | :--- | :--- |
@@ -433,8 +439,7 @@ AcademicMind/
 | 6 | memory/ | SQLite：模式偏好、单篇精读历史、任务日志、图片记忆（pHash）；Milvus Lite：向量记忆 | 独立模块，先跑通数据存取 |
 | 7 | skills/ | 论文精读 skill：单篇论文智能解析 + 五阶段深读 + 标准化 8 章报告 | 独立能力模块，按 schemas 契约实现 |
 | 8 | multimodal/ | SQLite pHash 图片去重、视觉工作记忆、Qwen-VL API 调用 | 依赖记忆库的数据结构；为 Researcher/Writer 提供检索接口 |
-| 9 | frontend/ | Streamlit 界面：模式切换 + 提问入口 + 报告展示 + HUMAN_IN_LOOP 交互 | 依赖 main.py 的完整流程与数据结构 |
-| 10 | evaluation/ | RAGAS 评估：检索相关性、答案忠实度、简易图文一致性 | 最后接入，验证全链路输出质量 |
+| 9 | frontend/ | FastAPI API 网关 + React 对话式界面：模式切换 + 双模式独立会话 + 意图分流 + HUMAN_IN_LOOP 交互 | 依赖 main.py 的完整流程与数据结构 |
 
 ---
 
@@ -481,6 +486,8 @@ AcademicMind/
 5. **统一模型 + 角色 Prompt**：所有 Agent 共用 DeepSeek-V4-Pro，通过 system prompt 区分角色，成本与复杂度最低
 6. **图片素材三层防线**：pHash 去重 → 子主题/关键词 + BGE 描述向量混合检索 → Qwen3-VL-Plus 图文匹配精排，避免"图长得像但语义不符"的素材混入报告
 7. **证据信息流（可追溯）**：Planner 产出 ResearchTask 研究任务单驱动 Researcher，Researcher 提炼结构化证据（finding ≠ claim，claim 带 source_id + evidence_text），Writer 按证据写并在正文标 [E#n]，Verifier 沿 [E#n] → Evidence → Claim → Source 链核对，Advisor 基于任务+证据判断研究空白——各环节编号（T/E/S）由系统分配，杜绝"引用不存在的证据"与"信息过手即衰减"
+8. **意图分类三层分流**：对话输入先经 LLM 轻量分类——简单问题 AI 秒答、专业调研走 5 Agent、其他复杂非学术问题礼貌拒答并说明原因，避免"你好"也被当成调研任务跑几分钟
+9. **论文摘要按 ID 取数 + 缓存**：arXiv 链接按 ID `id_list` 精确拉取、DOI 走 S2 `paper/{id}`，不吃搜索接口共享限流池；无 ID 才英文精炼搜索（S2 限流即弃）；结果按链接缓存——补摘要从"13 秒空等 + 0 条"提速到"0.7 秒命中"（约 20 倍）
 
 ---
 

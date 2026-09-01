@@ -138,18 +138,114 @@ def _local_keywords(question: str) -> list[str]:
 
 
 def _papers_for_task(flow: FlowState) -> list[dict]:
-    """论文模式：把用户给的论文转成候选清单，摘要缺失的按标题去搜"""
+    """论文模式：把用户给的论文转成候选清单，摘要缺失的补查摘要。
+    补摘要三步走（参考社区做法，见 Bug修复记录）：
+    ① 按链接里的 ID 直接取（arXiv ID / DOI → 官方取数接口，不触发搜索限流，最快最稳）
+    ② 取不到再精炼成英文关键词去搜（arXiv 优先，S2 限流时跳过不傻等）
+    ③ 还不行就用标题兜底，绝不让流程卡死"""
     out = []
     for p in flow.papers:
         if p.abstract:
             out.append({"title": p.title, "abstract": p.abstract, "link": p.link})
             continue
-        found = _search_arxiv(p.title, 1) or _search_semantic_scholar(p.title, 1)
-        if found:
-            out.append(found[0])
+        meta = _fetch_metadata_by_link(p.link)        # ① 按链接里的 ID 直接取摘要
+        if meta is None:
+            meta = _search_metadata_by_title(p.title)  # ② 精炼英文关键词再搜
+        if meta:
+            out.append(meta)
         else:
-            out.append({"title": p.title, "abstract": "", "link": p.link})   # 搜不到用标题兜底
+            out.append({"title": p.title, "abstract": "", "link": p.link})   # ③ 搜不到用标题兜底
     return out
+
+
+# 元数据内存缓存：同一篇论文（按链接）只查一次，重复分析零成本（社区通用做法）
+_META_CACHE: dict[str, dict] = {}
+
+
+def _fetch_metadata_by_link(link: str) -> dict | None:
+    """按链接里的论文 ID 直接取摘要（不搜索、不撞共享搜索限流池）：
+    - arXiv 链接 → 用 arxiv 库的 id_list 按 ID 精确拉取
+    - DOI 链接 → 调 Semantic Scholar 的 paper/{id} 取数接口
+    命中返回 {title, abstract, link}，取不到返回 None；结果按链接缓存"""
+    if not link:
+        return None
+    if link in _META_CACHE:                  # 缓存命中：同一链接不重复查
+        return _META_CACHE[link]
+    meta = None
+    # ① arXiv ID：id_list 是精确匹配，一次请求拿全元数据
+    m = re.search(r"arxiv\.org/(?:abs|pdf)/([\w.\-]+)", link)
+    if m:
+        meta = _fetch_arxiv_by_id(m.group(1))
+    # ② DOI：Semantic Scholar 的取数接口认 DOI 当 ID
+    if meta is None:
+        m = re.search(r"doi\.org/([\w.\-/]+)", link)
+        if m:
+            meta = _fetch_s2_by_id(f"DOI:{m.group(1)}")
+    if meta:
+        _META_CACHE[link] = meta             # 缓存，避免重复分析同一篇论文
+    return meta
+
+
+def _fetch_arxiv_by_id(arxiv_id: str) -> dict | None:
+    """按 arXiv ID 取论文元数据：id_list 精确匹配，不走关键词搜索、不会触发限流"""
+    try:
+        import arxiv
+    except ImportError:
+        log.warning("arxiv 库未安装，跳过按 ID 取元数据")
+        return None
+    try:
+        client = arxiv.Client()
+        search = arxiv.Search(id_list=[arxiv_id], max_results=1)
+        r = next(client.results(search), None)
+        if r is None:
+            return None
+        return {
+            "title": (r.title or "").strip(),
+            "abstract": (r.summary or "").strip().replace("\n", " "),
+            "link": r.entry_id,
+        }
+    except Exception as e:
+        log.warning("按 arXiv ID 取元数据失败（%s）：%s", type(e).__name__, arxiv_id)
+        return None
+
+
+def _fetch_s2_by_id(paper_id: str) -> dict | None:
+    """按论文 ID（DOI 等）取元数据：Semantic Scholar 的精确取数接口，不受共享搜索限流池影响"""
+    url = f"https://api.semanticscholar.org/graph/v1/paper/{paper_id}"
+    try:
+        with httpx.Client(timeout=30) as client:
+            resp = client.get(url, params={"fields": "title,abstract,url"})
+            if resp.status_code == 429:      # 取数接口也有限流，遇到就放弃，走下一步兜底
+                log.warning("Semantic Scholar 按 ID 取数限流(429)：%s", paper_id)
+                return None
+            resp.raise_for_status()
+            d = resp.json()
+            title = (d.get("title") or "").strip()
+            if not title:
+                return None
+            return {
+                "title": title,
+                "abstract": (d.get("abstract") or "").strip().replace("\n", " "),
+                "link": d.get("url") or "",
+            }
+    except Exception as e:
+        log.warning("按 DOI 取元数据失败（%s）：%s", type(e).__name__, paper_id)
+        return None
+
+
+def _search_metadata_by_title(title: str) -> dict | None:
+    """按标题补摘要：先精炼成英文关键词再搜（arXiv 是英文库，中文关键词命中率趋近 0）。
+    arXiv 优先搜；S2 只在 arXiv 没搜到时兜底，且限流就跳过不傻等（社区 429 处理共识）"""
+    queries = _refine_queries(ResearchTask(id="T0", question=title, purpose="补全论文摘要"))
+    for q in queries:
+        found = _search_arxiv(q, 1)
+        if found:
+            return found[0]
+    for q in queries:
+        found = _search_semantic_scholar(q, 1, retries=0)   # 限流直接放弃，不花时间重试
+        if found:
+            return found[0]
+    return None
 
 
 def _extract_evidence(task: ResearchTask, papers: list[dict]) -> Evidence:
@@ -289,7 +385,7 @@ def _search_arxiv(query: str, max_results: int, retries: int = 2) -> list[dict]:
 
 def _search_semantic_scholar(query: str, max_results: int, retries: int = 3) -> list[dict]:
     """调 Semantic Scholar API 搜论文，返回 [{title, abstract, link}]。免费接口，无需 key。
-    429 限流时指数退避重试（最多 retries 次），仍失败才返回空列表，不拖垮主流程"""
+    429 限流时指数退避重试（默认最多 3 次；补摘要场景可传 0 表示限流即放弃），仍失败才返回空列表"""
     url = "https://api.semanticscholar.org/graph/v1/paper/search"
     params = {
         "query": query,

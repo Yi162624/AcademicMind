@@ -67,7 +67,6 @@ AcademicMind/
 ├── multimodal/              # 图片理解（Qwen-VL）、图文检索（BGE + VLM 精排）、视觉工作记忆
 ├── skills/paper_deep_read/  # 单篇精读 skill（五阶段 + 八段式报告）
 ├── frontend/                # Streamlit 前端（规划中）
-└── evaluation/              # RAGAS 质量评估（规划中）
 ```
 
 ## 技术栈
