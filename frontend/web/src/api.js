@@ -49,7 +49,11 @@ export async function uploadPdf(file) {
   const fd = new FormData()
   fd.append('file', file)
   const resp = await fetch('/api/upload', { method: 'POST', body: fd })
-  if (!resp.ok) throw new Error(`上传失败 ${resp.status}`)
+  if (!resp.ok) {
+    // 后端校验失败会带 detail（如"PDF 不完整/损坏"），解析出来给用户看具体原因
+    const data = await resp.json().catch(() => null)
+    throw new Error(data?.detail || `上传失败 ${resp.status}`)
+  }
   return resp.json()
 }
 

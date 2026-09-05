@@ -17,18 +17,15 @@ from typing import Optional
 
 import httpx
 
-from core.config import CACHE_DIR
+from core.config import CACHE_DIR, RESEARCH_SOURCE
 from core.json_utils import parse_json
 from core.llm_client import chat, vision
 from core.logger import get_logger
 from core.schemas import DeepReadReport, PaperInfo, PaperSource
 from memory.sqlite_store import make_paper_key, save_paper_analysis, PaperAnalysis
 from skills.paper_deep_read.prompts import (
-    STAGE0_STRUCTURE_PROMPT,
     STAGE1_REASONING_PROMPT,
-    STAGE2_PLANNER,
-    STAGE3_SECTION,
-    STAGE4_EDITOR,
+    STAGE_REPORT,
     TRUNCATE_PROMPT,
     DESCRIBE_FIGURE_PROMPT,
 )
@@ -71,8 +68,8 @@ def run_deep_read(paper: PaperSource) -> DeepReadReport:
     else:
         log.info("论文无图表，跳过视觉理解")
 
-    # 第四步：Stage0 — 论文结构地图（非关键路径，失败用空地图继续）
-    structure_map = _stage0_structure_map(full_text, figure_notes)
+    # 第四步：跳过 Stage0 结构地图（非关键路径，直接用空地图）
+    structure_map = {}
 
     # 第五步：Stage1 — 论文推理知识库（核心：还原作者推理链）
     stage1 = _stage1_reasoning_extract(full_text, figure_notes, structure_map)
@@ -87,28 +84,17 @@ def run_deep_read(paper: PaperSource) -> DeepReadReport:
     if not identity.get("title"):
         identity["title"] = paper.title
 
-    # 第六步：Stage2 — 教学规划（决定讲什么、分哪些章节）
-    plan = _stage2_planner(stage1)
-    if plan is None:
-        log.warning("Stage2 教学规划失败，使用空规划继续")
-        plan = {}
+    # 第六步：一次性生成整篇精读报告（参考 Paper Explainer 设计：
+    # 直接拿论文全文 + Stage1 推理知识库，让 LLM 连贯地写完，不分章拼接）
+    full_report_text = _generate_full_report(full_text, figure_notes, stage1)
+    if not full_report_text:
+        log.error("报告生成失败：%s", paper.link)
+        return _fallback_report(paper, "LLM 生成精读报告失败")
 
-    # 第七步：Stage3 — 动态分章并行生成（每章收到完整推理知识库 + 教学规划）
-    sections = _stage3_generate_sections(stage1, plan)
-    if sections is None:
-        log.error("Stage3 分章生成失败：%s", paper.link)
-        return _fallback_report(paper, "LLM 分章生成报告失败")
+    # 第七步：组装 DeepReadReport（full_report 用 LLM 生成的完整文本，其余字段从 Stage1 提取）
+    report = _build_report(stage1, full_report_text)
 
-    # 第八步：Stage4 — 定点修正（只重写有问题的章节；失败则用 Stage3 原稿继续，不废整篇）
-    editor_result = _stage4_editor(stage1, plan, sections)
-    if editor_result is None:
-        log.warning("Stage4 定点修正失败，使用 Stage3 原稿成稿")
-        editor_result = {"issues": [], "revised_sections": []}
-
-    # 第九步：拼接章节 + 应用定点修正 → DeepReadReport（full_report 是主产物）
-    report = _build_report(stage1, plan, sections, editor_result)
-
-    # 第十步：存精读历史（非关键路径，失败不影响主流程）
+    # 第八步：存精读历史（非关键路径，失败不影响主流程）
     _save_to_history(paper, arxiv_id, report)
 
     log.info("单篇精读完成：%s", paper.title)
@@ -122,6 +108,8 @@ def run_deep_read(paper: PaperSource) -> DeepReadReport:
 def is_arxiv_url(link: str) -> str:
     """判断链接是不是 arXiv 链接，是的话返回 arXiv ID，不是返回空字符串"""
     m = re.search(r"arxiv\.org/(?:abs|pdf)/([\w.\-]+)", link)
+    if not m:
+        return ""   # 不是 arXiv 链接，直接返回空，让上层走其他解析分支
     arxiv_id = m.group(1).strip("/")
     if arxiv_id.lower().endswith(".pdf"):
         arxiv_id = arxiv_id[:-4]
@@ -133,6 +121,13 @@ def resolve_pdf(paper: PaperSource) -> tuple[Optional[str], str]:
     返回 (pdf_path, arxiv_id)：路径是本地文件地址，ID 是论文指纹（非 arXiv 则为空）。
     三步策略：① arXiv 链接 → 构造 PDF 地址下载；② 本地 .pdf 路径 → 直接用；③ 其他 URL → 下载后判断"""
     link = paper.link.strip()
+    # 比赛合规（domestic）：arXiv/其他 URL 下载都是境外请求，规则禁调；
+    # 比赛版只允许"本地上传 PDF"，其余场景走这里返回 None 由上层报错，比赛后 RESEARCH_SOURCE=international 恢复联网
+    if RESEARCH_SOURCE != "international" and not (
+        link.endswith(".pdf") and os.path.isfile(link)
+    ):
+        log.warning("合规模式（RESEARCH_SOURCE=%s）仅支持本地上传 PDF，拒绝联网下载：%s", RESEARCH_SOURCE, link)
+        return None, ""
 
     # ① arXiv 链接：构造 PDF 下载地址
     arxiv_id = is_arxiv_url(link)
@@ -336,7 +331,7 @@ def _stage1_reasoning_extract(full_text: str, figure_notes: list[str], structure
         resp = chat(
             system="你是论文推理分析专家。只输出 JSON，不要加任何解释、Markdown 代码块标记或额外文字。",
             user=prompt,
-            max_tokens=65536,  # 推理知识库字段多，留够空间避免长 JSON 截断
+            max_tokens=32768,  # 3 万档够装完整推理知识库；之前 65536 让 flash 模型写超长嵌套 JSON 容易深层出错
         )
         data = parse_json(resp.text)
         if data is None:
@@ -379,6 +374,32 @@ def _stage1_reasoning_extract_truncated(full_text: str, figure_notes: list[str],
 
 
 # ============================================================
+# 一次性生成整篇精读报告（参考 Paper Explainer 设计）
+# ============================================================
+
+def _generate_full_report(full_text: str, figure_notes: list[str], stage1: dict) -> Optional[str]:
+    """直接拿论文全文 + Stage1 推理知识库，让 LLM 一次性写完整篇精读报告。
+    不分章拼接，保证内容连贯；融入 Paper Explainer 的锚点、三类陈述、批判性分析设计。"""
+    stage1_json = json.dumps(stage1, ensure_ascii=False, indent=2)
+    prompt = (STAGE_REPORT
+              .replace("{paper_text}", full_text)
+              .replace("{figure_notes}", _join_figure_notes(figure_notes))
+              .replace("{stage1_json}", stage1_json))
+    try:
+        resp = chat(
+            system="你是论文精读讲解专家。用中文写一份面向小白的精读报告，术语保留英文。",
+            user=prompt,
+            max_tokens=65536,  # 整篇报告一次性输出，留足空间
+        )
+        text = resp.text.strip()
+        log.info("整篇精读报告生成完成：%d 字", len(text))
+        return text
+    except Exception as e:
+        log.warning("整篇报告生成失败（%s）", type(e).__name__)
+        return None
+
+
+# ============================================================
 # Stage2：教学规划
 # ============================================================
 
@@ -410,14 +431,12 @@ def _stage2_planner(stage1: dict) -> Optional[dict]:
 # ============================================================
 
 def _default_sections() -> list[dict]:
-    """Stage2 没给出章节时用的兜底教学顺序（8 段标准推理链）"""
+    """Stage2 没给出章节时用的兜底教学顺序（6 段标准推理链）"""
     return [
         {"title": "为什么研究这个问题", "goal": "让读者明白这个问题为什么值得研究"},
         {"title": "以前方法怎么解决", "goal": "介绍旧方法的思路和做法"},
-        {"title": "为什么失败", "goal": "说清旧方法的局限和失败原因"},
         {"title": "作者核心突破", "goal": "解释作者想通了什么关键点"},
         {"title": "方法设计", "goal": "解释方法为什么这样设计"},
-        {"title": "关键模块解释", "goal": "用大白话讲清核心概念和模块"},
         {"title": "实验验证", "goal": "说明实验如何证明作者观点"},
         {"title": "局限和影响", "goal": "讲清局限和这篇论文改变了什么"},
     ]
@@ -428,6 +447,8 @@ def _stage3_generate_sections(stage1: dict, plan: dict) -> Optional[list[dict]]:
     每章收到完整推理知识库 + 教学规划。单章失败按 5s/10s/20s 退避重试，
     彻底失败返回占位符（不拖垮整篇），只有线程池级错误才返回 None"""
     sections = (plan or {}).get("sections") or _default_sections()
+    # 章节数上限 6：避免 LLM 输出过多章节拖慢生成
+    sections = sections[:6]
     stage1_json = json.dumps(stage1, ensure_ascii=False, indent=2)
     plan_json = json.dumps(plan, ensure_ascii=False, indent=2) if plan else "{}"
 
@@ -606,10 +627,9 @@ def _join_story_problem(story: dict) -> str:
     return "\n".join(parts)
 
 
-def _build_report(stage1: dict, plan: dict, sections: list[dict], editor_result: dict) -> DeepReadReport:
-    """把 Stage1 推理知识库 + Stage3 章节 + Stage4 定点修正结果映射回 DeepReadReport。
-    full_report = 按教学顺序拼接章节（有修正用修正版，无修正用 Stage3 原稿）；
-    其余固定字段从推理知识库抽取，兼容下游结构化读取"""
+def _build_report(stage1: dict, full_report_text: str) -> DeepReadReport:
+    """把 Stage1 推理知识库 + LLM 生成的完整报告文本组装成 DeepReadReport。
+    full_report 直接用 LLM 一次性生成的文本（不分章拼接），其余固定字段从 Stage1 抽取。"""
     identity = stage1.get("paper_identity", {}) or {}
     authors = identity.get("authors", [])
     authors_str = ", ".join(str(a) for a in authors) if isinstance(authors, list) else (str(authors) if authors else "")
@@ -618,24 +638,6 @@ def _build_report(stage1: dict, plan: dict, sections: list[dict], editor_result:
     designs = stage1.get("design_reasoning", []) or []
     concepts = stage1.get("concept_knowledge", []) or []
     exp_reasons = stage1.get("experiment_reasoning", []) or []
-
-    # 组装 full_report：先建"标题→修正内容"映射，再按顺序拼章节（有修正用修正版）
-    revised_map = {}
-    for r in (editor_result.get("revised_sections") or []):
-        if isinstance(r, dict) and r.get("title"):
-            revised_map[str(r["title"]).strip()] = str(r.get("content", "")).strip()
-
-    blocks = []
-    for sec in (sections or []):
-        title = str(sec.get("title", "")).strip() if isinstance(sec, dict) else ""
-        content = str(sec.get("content", "")).strip() if isinstance(sec, dict) else ""
-        if not content:
-            continue
-        # 有修正版就用修正版
-        content = revised_map.get(title, content)
-        # 去掉内容开头已有的 "## 标题" 行，避免和下面统一加的标题重复
-        content = re.sub(r"^#{1,6}\s+[^\n]*\n+", "", content).strip()
-        blocks.append(f"## {title}\n\n{content}" if title else content)
 
     # 报告开头加元信息头（论文标题/作者/会议/年份/日期），由代码精确生成，不靠 LLM
     header_parts = []
@@ -655,15 +657,11 @@ def _build_report(stage1: dict, plan: dict, sections: list[dict], editor_result:
     header_parts.append("\n".join(meta))
     header = "\n".join(header_parts)
 
-    final_report = header + "\n\n" + "\n\n".join(blocks)
+    final_report = header + "\n\n" + full_report_text
 
-    issues = editor_result.get("issues", [])
-    verification_notes = "\n".join(str(x) for x in issues) if isinstance(issues, list) else str(issues or "")
-
-    plan = plan or {}
-    one_line = (plan.get("core_breakthrough", "")
-                or story.get("new_hypothesis", "")
-                or story.get("key_observation", ""))
+    one_line = (story.get("new_hypothesis", "")
+                or story.get("key_observation", "")
+                or story.get("research_gap", ""))
 
     return DeepReadReport(
         paper_info=PaperInfo(
@@ -685,7 +683,7 @@ def _build_report(stage1: dict, plan: dict, sections: list[dict], editor_result:
         related_directions=[],
         reading_guide=stage1.get("reading_guide", ""),
         full_report=final_report,
-        verification_notes=verification_notes,
+        verification_notes="",
     )
 
 

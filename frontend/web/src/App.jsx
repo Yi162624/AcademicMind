@@ -4,7 +4,7 @@
 //   2. 对话进行中锁定模式切换：running=true 时侧边栏按钮禁用
 //   3. 对话历史不丢：消息存 React state（不整页刷新），后端跑完直接 append
 //   4. HIL 交互：后端返回 interrupt 时渲染确认卡片，用户点按钮调 resume 接着跑
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import { classify, getConfig, resumeTask, saveConfig, simpleChat, startTask, uploadPdf } from './api'
 
 // 模式常量：和后端 core/schemas.py 的 MODE_SURVEY / MODE_PAPER 对齐
@@ -20,6 +20,38 @@ function emptyConv() {
 function looksLikePaper(text) {
   const t = text.trim().toLowerCase()
   return t.startsWith('http://') || t.startsWith('https://') || t.includes('arxiv.org') || t.endsWith('.pdf')
+}
+
+// 把消息转成完整格式：自动补上发送时间（渲染时按间隔显示，像微信）
+function stamp(m) {
+  return { ...m, time: m.time || Date.now() }
+}
+
+// 格式化消息时间显示：今天的只显示 时:分；不是今天的前面带日期（如 "昨天 14:30" / "09-02 14:30"）
+function formatTime(ts) {
+  const d = new Date(ts)
+  const now = new Date()
+  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  const sameDay = d.toDateString() === now.toDateString()
+  if (sameDay) return hm
+  const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1)
+  if (d.toDateString() === yesterday.toDateString()) return `昨天 ${hm}`
+  return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${hm}`
+}
+
+// 两条消息间隔超过这个时间才显示时间标签（微信大约 5 分钟内不重复显示）
+const TIME_GAP = 5 * 60 * 1000
+
+// 判断消息 m 前要不要插一条时间分隔：第一条消息、或与上一条间隔超 5 分钟、或跨天都要显示
+function needTimeDivider(m, prev) {
+  if (!m.time) return false
+  if (!prev || !prev.time) return true
+  return m.time - prev.time > TIME_GAP || new Date(m.time).toDateString() !== new Date(prev.time).toDateString()
+}
+
+// 时间分隔标签：居中的一行小字（模仿微信聊天记录里的时间提示）
+function TimeDivider({ ts }) {
+  return <div className="time-divider">{formatTime(ts)}</div>
 }
 
 // 把后端 interrupt/result 统一转成一条"AI 消息"塞进对话
@@ -53,7 +85,8 @@ export default function App() {
 
   // 更新当前模式会话的辅助函数（只动当前模式那份，不影响另一个模式）
   const patch = (p) => setConvs(prev => ({ ...prev, [mode]: { ...prev[mode], ...p } }))
-  const pushMsg = (m) => setConvs(prev => ({ ...prev, [mode]: { ...prev[mode], messages: [...prev[mode].messages, m] } }))
+  // 加消息统一走这里：自动补发送时间戳，渲染时按间隔显示（像微信）
+  const pushMsg = (m) => setConvs(prev => ({ ...prev, [mode]: { ...prev[mode], messages: [...prev[mode].messages, stamp(m)] } }))
 
   // 切换模式：运行中锁死（需求2），空闲时才允许切；切完持久化偏好
   const switchMode = (m) => {
@@ -66,7 +99,7 @@ export default function App() {
   const runAndAppend = async (promise) => {
     try {
       const resp = await promise
-      const msg = packAssistantMessage(resp)
+      const msg = stamp(packAssistantMessage(resp))
       setConvs(prev => ({
         ...prev, [mode]: {
           ...prev[mode],
@@ -107,7 +140,18 @@ export default function App() {
         runAndAppend(startTask({ mode, question: '', papers, threadId: conv.threadId }))
         return
       }
-      // 输入里没有链接（可能是普通文字）：先分类再分流
+      // 已经上传过论文：把输入当成分析指令，直接启动分析
+      // （不走意图分类，否则"分析"这种短词会被误判为 other 拒答）
+      if (conv.papers.length > 0) {
+        // 把论文标题拼到用户消息里，对话流里能看到附带了哪些论文
+        const paperList = conv.papers.map(p => `📎 ${p.title}`).join('\n')
+        pushMsg({ role: 'user', kind: 'text', text: text ? `${text}\n${paperList}` : paperList })
+        const papers = [...conv.papers]
+        patch({ running: true, pending: null, papers: [] })
+        runAndAppend(startTask({ mode, question: text, papers, threadId: conv.threadId }))
+        return
+      }
+      // 没上传论文：走意图分类
       pushMsg({ role: 'user', kind: 'text', text })
       patch({ running: true })
       await handleClassified(text, mode)
@@ -164,8 +208,9 @@ export default function App() {
     for (const f of files) {
       try {
         const saved = await uploadPdf(f)
+        // 上传后只更新 papers 数组，论文在输入框的 chip 里显示
+        // 不在对话流里发消息——发送之前对话里不该有上传记录
         setConvs(prev => ({ ...prev, [mode]: { ...prev[mode], papers: [...prev[mode].papers, saved] } }))
-        pushMsg({ role: 'user', kind: 'text', text: `📎 上传论文：${saved.title}` })
       } catch (err) {
         pushMsg({ role: 'ai', kind: 'error', text: `上传失败：${err.message}` })
       }
@@ -224,10 +269,14 @@ export default function App() {
           )}
 
           {conv.messages.map((m, i) => (
-            <Message key={i} msg={m}
-              // 只有"最后一条且当前待确认"的消息才可交互，历史确认只读
-              interactive={m === conv.pending}
-              onRespond={respond} />
+            // 时间分隔：第一条或与上一条间隔超 5 分钟时，先插一条居中时间（微信样式）
+            <Fragment key={i}>
+              {needTimeDivider(m, conv.messages[i - 1]) && <TimeDivider ts={m.time} />}
+              <Message msg={m}
+                // 只有"最后一条且当前待确认"的消息才可交互，历史确认只读
+                interactive={m === conv.pending}
+                onRespond={respond} />
+            </Fragment>
           ))}
 
           {running && (
@@ -242,34 +291,38 @@ export default function App() {
           <div ref={chatEndRef} />
         </div></div>
 
-        {/* 输入区：论文模式带 PDF 上传和待分析列表 */}
+        {/* 输入区：论文模式带 PDF 上传，附件标签放在输入框内部（跟 ChatGPT/Claude 一样） */}
         <div className="input-area"><div className="input-inner">
-          {mode === PAPER && conv.papers.length > 0 && (
-            <div className="paper-chips">
-              {conv.papers.map((p, i) => (
-                <span className="chip" key={i}>📎 {p.title}
-                  <button onClick={() => removePaper(i)} title="移除">✕</button>
-                </span>
-              ))}
-            </div>
-          )}
           <div className="input-row">
-            {mode === PAPER && (
-              <>
-                <input type="file" accept="application/pdf" multiple hidden ref={fileRef} onChange={onUpload} />
-                <button className="icon-btn" title="上传 PDF" onClick={() => fileRef.current?.click()} disabled={running}>📎</button>
-              </>
+            {/* 已上传的论文标签：在输入框内部顶部，不单独占一行 */}
+            {mode === PAPER && conv.papers.length > 0 && (
+              <div className="paper-chips">
+                {conv.papers.map((p, i) => (
+                  <span className="chip" key={i}>📎 {p.title}
+                    <button onClick={() => removePaper(i)} title="移除">✕</button>
+                  </span>
+                ))}
+              </div>
             )}
-            <textarea
-              rows={1}
-              value={input}
-              placeholder={mode === SURVEY ? '输入研究问题，回车发送…' : '粘贴论文链接（可多篇），回车开始分析…'}
-              onChange={e => setInput(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }}
-              disabled={running}
-            />
-            <button className="icon-btn send" onClick={send}
-              disabled={running || (!input.trim() && conv.papers.length === 0)} title="发送">➤</button>
+            {/* 上传按钮 + 输入框 + 发送按钮，在同一行 */}
+            <div className="input-controls">
+              {mode === PAPER && (
+                <>
+                  <input type="file" accept="application/pdf" multiple hidden ref={fileRef} onChange={onUpload} />
+                  <button className="icon-btn" title="上传 PDF" onClick={() => fileRef.current?.click()} disabled={running}>📎</button>
+                </>
+              )}
+              <textarea
+                rows={1}
+                value={input}
+                placeholder={mode === SURVEY ? '输入研究问题，回车发送…' : '粘贴论文链接（可多篇），回车开始分析…'}
+                onChange={e => setInput(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }}
+                disabled={running}
+              />
+              <button className="icon-btn send" onClick={send}
+                disabled={running || (!input.trim() && conv.papers.length === 0)} title="发送">➤</button>
+            </div>
           </div>
           <div className="input-hint">
             {running ? '研究进行中，请稍候…' : (conv.pending ? '请先在上方完成确认' : 'Enter 发送 · Shift+Enter 换行')}
@@ -302,9 +355,11 @@ function Message({ msg, interactive, onRespond }) {
 function AiContent({ msg, interactive, onRespond }) {
   const [fb, setFb] = useState('')
   if (msg.kind === 'error') {
-    return <div>⚠️ 任务出错：{msg.text}<br /><small>请检查 .env 的 API Key 与网络。</small></div>
+    // 错误信息(msg.text)里已经带了真实原因（后端 detail 或网络错误描述），不再加固定尾巴误导用户
+    return <div>⚠️ 任务出错：{msg.text}</div>
   }
-  if (msg.kind === 'text') return <div>{msg.text}</div>
+  // 简单问答/拒答的文本里常带 markdown（**加粗**、标题、列表），走轻量 Markdown 渲染，避免符号原样露出
+  if (msg.kind === 'text') return <Markdown text={msg.text} />
 
   if (msg.kind === 'interrupt') return <InterruptCard msg={msg} interactive={interactive} onRespond={onRespond} fb={fb} setFb={setFb} />
 
@@ -392,11 +447,11 @@ function ResultView({ data }) {
     <div>
       {warnings.map((w, i) => <p key={i} className="issue">⚠️ {w}</p>)}
 
-      {/* 调研/对比报告：后端给的是完整 HTML，用 iframe + srcDoc 渲染 */}
-      {data.report?.html && (
+      {/* 调研/对比报告：后端给的是 Markdown 正文，用 Markdown 组件渲染，样式统一 */}
+      {data.report?.markdown && (
         <div>
           <h3>📄 研究报告</h3>
-          <iframe className="report-frame" title="report" srcDoc={data.report.html} />
+          <Markdown text={data.report.markdown} />
         </div>
       )}
 
@@ -438,20 +493,45 @@ function SuggestionView({ sug }) {
   )
 }
 
-// 极简 Markdown 渲染：把 # 标题/列表/粗体转成 HTML（精读报告用，不引第三方解析器）
+// 轻量 Markdown 渲染：标题/粗体/斜体/链接/列表/引用/段落（报告和 AI 文本用，不引第三方解析器）
 function Markdown({ text }) {
-  const html = text
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/^###### (.*)$/gm, '<h6>$1</h6>')
-    .replace(/^##### (.*)$/gm, '<h5>$1</h5>')
-    .replace(/^#### (.*)$/gm, '<h4>$1</h4>')
-    .replace(/^### (.*)$/gm, '<h3>$1</h3>')
-    .replace(/^## (.*)$/gm, '<h3>$1</h3>')
-    .replace(/^# (.*)$/gm, '<h3>$1</h3>')
+  if (!text) return null
+  // 先做 HTML 转义，防 LLM 输出里带恶意标签注入
+  const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  // 行内语法：粗体/斜体/链接（转义之后再做，避免链接里的 & 被二次处理）
+  const inline = (s) => s
     .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
-    .replace(/^[-*] (.*)$/gm, '<li>$1</li>')
-    .replace(/\n{2,}/g, '<br/><br/>')
-  return <div dangerouslySetInnerHTML={{ __html: html }} />
+    .replace(/\*(.+?)\*/g, '<i>$1</i>')
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>')
+
+  const lines = esc(text).split('\n')
+  const out = []
+  let listType = null   // 当前所在的列表类型：ul 或 ol，用来给列表包标签
+  const closeList = () => { if (listType) { out.push(`</${listType}>`); listType = null } }
+
+  for (const line of lines) {
+    let m
+    if ((m = line.match(/^(#{1,6})\s+(.*)$/))) {                       // 标题
+      closeList(); const lv = Math.min(m[1].length, 6)
+      out.push(`<h${lv}>${inline(m[2])}</h${lv}>`)
+    } else if ((m = line.match(/^\s*[-*]\s+(.*)$/))) {                 // 无序列表
+      if (listType !== 'ul') { closeList(); listType = 'ul'; out.push('<ul>') }
+      out.push(`<li>${inline(m[1])}</li>`)
+    } else if ((m = line.match(/^\s*\d+[.)]\s+(.*)$/))) {              // 有序列表
+      if (listType !== 'ol') { closeList(); listType = 'ol'; out.push('<ol>') }
+      out.push(`<li>${inline(m[1])}</li>`)
+    } else if ((m = line.match(/^&gt;\s?(.*)$/))) {                    // 引用块
+      closeList(); out.push(`<blockquote>${inline(m[1])}</blockquote>`)
+    } else if ((m = line.match(/^\s*---+\s*$/))) {                     // 分隔线
+      closeList(); out.push('<hr/>')
+    } else if (!line.trim()) {                                          // 空行：收尾当前列表
+      closeList()
+    } else {                                                            // 普通段落
+      closeList(); out.push(`<p>${inline(line)}</p>`)
+    }
+  }
+  closeList()
+  return <div className="md-report" dangerouslySetInnerHTML={{ __html: out.join('\n') }} />
 }
 
 // 用户头像：内联 SVG 人物剪影，比 emoji 更精致、跨平台显示一致

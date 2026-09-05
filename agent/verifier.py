@@ -25,7 +25,7 @@ def check_report(flow: FlowState) -> VerifierResult:
         # 报告都没有，谈不上检查，直接判过，让流程尽早暴露问题
         return VerifierResult(passed=True)
 
-    prompt = _build_prompt(flow, report.html)
+    prompt = _build_prompt(flow, report.markdown)
     try:
         resp = chat(system=_SYSTEM, user=prompt, max_tokens=8192)
         data = parse_json(resp.text)
@@ -43,13 +43,13 @@ def check_report(flow: FlowState) -> VerifierResult:
         return VerifierResult(passed=True)
 
 
-def _build_prompt(flow: FlowState, html: str) -> str:
-    """拼验证用的 prompt：把报告正文 + 证据链一起给 LLM，让它沿 [E#n] → Evidence → Claim → Source 核对"""
+def _build_prompt(flow: FlowState, md: str) -> str:
+    """拼验证用的 prompt：把报告正文 + 证据链一起给 LLM，让它核对"正文引用的论文标题"是否真实、论断有没有证据支撑"""
     sections = (flow.outline.sections if flow.outline else []) or ["未给大纲"]
     return f"""报告章节大纲：{sections}
 
-报告正文（HTML，关键事实后用 [E#n] 标注证据编号）：
-{html}
+报告正文（Markdown，引用论文处标注（来源：[论文标题](链接)））：
+{md}
 
 证据链（研究员整理的结构化证据，是"唯一事实来源"；E 编号=证据包，S 编号=来源论文）：
 {_serialize_evidences(flow)}
@@ -64,10 +64,10 @@ def _build_prompt(flow: FlowState, html: str) -> str:
 
 检查维度：
 1. fact（事实）：报告的事实/结论能否在证据链里找到对应论断（Claim）支撑，有没有凭空编造
-2. citation（引用）：报告里 [E#n] 引用的证据编号是否真实存在；论断的 source_id 是否对应真实来源论文
+2. citation（引用）：报告正文标注的论文标题是否真实存在于证据链的来源论文列表；论断的 source_id 是否对应真实来源论文；标题引用与正文内容是否对得上
 3. fidelity（忠实度）：报告是否忠实于证据原文，有没有夸大、曲解、扩大结论
 
-判定标准：error = 必须改（引用不存在的证据编号、编造数据、张冠李戴、严重曲解）；warning = 建议改（表述不严谨）。"""
+判定标准：error = 必须改（引用不存在的论文、编造数据、张冠李戴、严重曲解）；warning = 建议改（表述不严谨）。"""
 
 
 def _serialize_evidences(flow: FlowState) -> str:

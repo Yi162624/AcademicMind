@@ -27,6 +27,15 @@ logs/
 # 日志器（core/logger.py）生成的日志文件
 data/logs/
 
+# 比赛材料（含说明书/交付包，不上传 GitHub）
+比赛材料/
+
+# 比赛提交总文件夹（报名表/说明书/视频/交付包等，仅本地上传比赛用）
+比赛提交/
+
+# 根目录比赛上传包（zip 上传用，非源码内容）
+Program_Delivery.zip
+
 # 测试与覆盖率（evaluation 评估阶段用）
 .pytest_cache/
 .coverage

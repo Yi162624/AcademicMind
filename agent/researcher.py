@@ -6,7 +6,8 @@
 # 位置：agent/researcher.py，被 main.py 的 researcher_node 调用
 # 产出：list[Evidence]（每个研究任务一个 Evidence，证据编号 E1/E2 和来源编号 S1/S2 由系统统一分配）
 #
-# 图片来源：arXiv + Semantic Scholar（免费、无需 key）。
+# 图片来源：arXiv + OpenAlex（都免费、无需 key、限流宽松）。
+# 原 Semantic Scholar 免费接口按 IP 限流极激进（共享限流池），实测频繁 429 拖慢全流程，已弃用换 OpenAlex（社区验证过的做法）。
 # 图片素材搜集暂未接入（图片搜索 API 还没定），Evidence.images 字段已预留，后续补。
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -16,6 +17,7 @@ import time
 
 import httpx
 
+from core.config import RESEARCH_SOURCE  # noqa: E402   # 比赛合规开关：domestic 时禁调境外论文 API
 from core.json_utils import parse_json
 from core.llm_client import chat
 from core.logger import get_logger
@@ -25,7 +27,7 @@ log = get_logger("researcher")
 
 # 每个任务从单个来源搜多少篇，合并去重后大概 8-10 篇，够提炼证据用
 _ARXIV_NUM = 5
-_S2_NUM = 5
+_OPENALEX_NUM = 5
 
 # 研究员提炼证据的角色设定，逼 LLM 只输出结构化 JSON
 _SYSTEM = "你是学术研究员。从给定论文摘要中提炼能回答研究问题的证据，只输出 JSON，不要加任何解释或 Markdown 代码块。"
@@ -68,7 +70,7 @@ def _run_tasks_parallel(tasks: list[ResearchTask], flow: FlowState) -> list[Evid
 
 
 def _research_task(task: ResearchTask, flow: FlowState) -> Evidence:
-    """围绕一个研究任务搜集并提炼证据。调研模式搜 arXiv+S2，论文模式从用户给的论文提炼。
+    """围绕一个研究任务搜集并提炼证据。调研模式搜 arXiv+OpenAlex，论文模式从用户给的论文提炼。
     # 图片素材预留：等确定图片搜索 API 后，在这里搜图并调 visual_working_memory.add_image() 入库"""
     if flow.mode == MODE_PAPER:
         papers = _papers_for_task(flow)   # 论文模式：候选是用户给的论文（摘要缺失的补搜）
@@ -80,36 +82,40 @@ def _research_task(task: ResearchTask, flow: FlowState) -> Evidence:
 
 
 def _search_task(task: ResearchTask) -> list[dict]:
-    """调研模式搜索：先把研究问题精炼成 1-2 条短搜索词（LLM），再逐条去 arXiv+S2 搜。
-    用短关键词而非整句中文问句，arXiv 不会报错、S2 命中率也更高；合并去重后返回候选"""
+    """调研模式搜索：先把研究问题精炼成 1-2 条短搜索词（LLM），再逐条去 arXiv+OpenAlex 搜。
+    用短关键词而非整句中文问句，arXiv 不会报错、OpenAlex 命中率也更高；合并去重后返回候选"""
+    # 比赛合规（domestic）：arXiv/OpenAlex 全是境外 API，比赛规则禁调，直接不搜返回空；
+    # 演示走论文模式（本地上传 PDF），调研搜索等比赛后 RESEARCH_SOURCE=international 再恢复
+    if RESEARCH_SOURCE != "international":
+        log.info("合规模式（RESEARCH_SOURCE=%s）不联网搜索论文，跳过任务「%s」", RESEARCH_SOURCE, task.id)
+        return []
     queries = _refine_queries(task)                     # 精炼搜索词（失败降级为原始问题）
     papers: list[dict] = []
     for q in queries:
         papers += _search_arxiv(q, _ARXIV_NUM)
-        papers += _search_semantic_scholar(q, _S2_NUM)
+        papers += _search_openalex(q, _OPENALEX_NUM)
     return _dedup_papers(papers)
 
 
 def _refine_queries(task: ResearchTask) -> list[str]:
     """把研究问题精炼成 1-2 条短搜索词（LLM 一步搞定，无需额外思考）。
-    学术搜索接口不认整句中文长问题：arXiv 超长 query 直接 HTTPError、S2 命中率差。
+    学术搜索接口不认整句中文长问题：arXiv 超长 query 直接 HTTPError、OpenAlex 命中率差。
     改写成短英文关键词后两个源都搜得动。
-    注意：deepseek-v4-pro 是思考型模型，输出不稳定（偶发不按 JSON 输出），
+    注意：deepseek-v4-flash 输出不稳定（偶发不按 JSON 输出），
     失败时降级用本地关键词提取，绝不用原始整句——那会让搜索全部落空"""
     prompt = f"""研究问题：{task.question}
 研究目的：{task.purpose}
 
 请把上面的研究问题改写成 1-2 条学术搜索引擎能用的关键词查询：
 - 每条必须短（不超过 40 个字符）、关键词型，不要疑问句
-- 如果是中文问题，翻译成英文关键词（arXiv/Semantic Scholar 对英文支持更好）
+- 如果是中文问题，翻译成英文关键词（arXiv/OpenAlex 对英文支持更好）
 - 只输出如下 JSON：{{"queries": ["关键词查询1", "关键词查询2"]}}"""
 
     try:
         resp = chat(
             system="你是搜索词优化专家。把研究问题改写成适合学术搜索引擎的短关键词查询，只输出 JSON，不要任何解释或 Markdown 代码块。",
             user=prompt,
-            # 注意：deepseek-v4-pro 是思考型模型，会先消耗大量 token 思考再输出，
-            # max_tokens 给太小（如 512）思考没完就被截断、content 为空，所以给足空间
+            # 注意：deepseek-v4-flash 输出可能较长，max_tokens 给太小（如 512）会被截断、content 为空，所以给足空间
             max_tokens=4096,
         )
         data = parse_json(resp.text)
@@ -122,7 +128,7 @@ def _refine_queries(task: ResearchTask) -> list[str]:
         log.warning("任务「%s」搜索词精炼失败（%s），用本地关键词提取", task.id, type(e).__name__)
 
     # LLM 没精炼出干净词时，本地兜底：去标点、去疑问词，压成一条短中文关键词
-    # （比整句问话强：S2 能命中、arXiv 也少报错；英文关键词只能等 LLM 正常时才有）
+    # （比整句问话强：OpenAlex 能命中、arXiv 也少报错；英文关键词只能等 LLM 正常时才有）
     return _local_keywords(task.question)
 
 
@@ -141,7 +147,7 @@ def _papers_for_task(flow: FlowState) -> list[dict]:
     """论文模式：把用户给的论文转成候选清单，摘要缺失的补查摘要。
     补摘要三步走（参考社区做法，见 Bug修复记录）：
     ① 按链接里的 ID 直接取（arXiv ID / DOI → 官方取数接口，不触发搜索限流，最快最稳）
-    ② 取不到再精炼成英文关键词去搜（arXiv 优先，S2 限流时跳过不傻等）
+    ② 取不到再精炼成英文关键词去搜（arXiv 优先，OpenAlex 兜底）
     ③ 还不行就用标题兜底，绝不让流程卡死"""
     out = []
     for p in flow.papers:
@@ -165,8 +171,13 @@ _META_CACHE: dict[str, dict] = {}
 def _fetch_metadata_by_link(link: str) -> dict | None:
     """按链接里的论文 ID 直接取摘要（不搜索、不撞共享搜索限流池）：
     - arXiv 链接 → 用 arxiv 库的 id_list 按 ID 精确拉取
-    - DOI 链接 → 调 Semantic Scholar 的 paper/{id} 取数接口
+    - DOI 链接 → 调 OpenAlex 的 works/doi:{id} 取数接口
     命中返回 {title, abstract, link}，取不到返回 None；结果按链接缓存"""
+    # 比赛合规（domestic）：arXiv/OpenAlex 全是境外 API，禁调，返回 None 走标题兜底；
+    # 论文全文已由 Docling 本地解析，摘要缺失不影响精读主流程
+    if RESEARCH_SOURCE != "international":
+        log.info("合规模式（RESEARCH_SOURCE=%s）不联网取论文元数据", RESEARCH_SOURCE)
+        return None
     if not link:
         return None
     if link in _META_CACHE:                  # 缓存命中：同一链接不重复查
@@ -176,11 +187,11 @@ def _fetch_metadata_by_link(link: str) -> dict | None:
     m = re.search(r"arxiv\.org/(?:abs|pdf)/([\w.\-]+)", link)
     if m:
         meta = _fetch_arxiv_by_id(m.group(1))
-    # ② DOI：Semantic Scholar 的取数接口认 DOI 当 ID
+    # ② DOI：OpenAlex 认 DOI 当 ID，按 DOI 直接取数（不搜索、不撞搜索限流）
     if meta is None:
         m = re.search(r"doi\.org/([\w.\-/]+)", link)
         if m:
-            meta = _fetch_s2_by_id(f"DOI:{m.group(1)}")
+            meta = _fetch_openalex_by_doi(m.group(1))
     if meta:
         _META_CACHE[link] = meta             # 缓存，避免重复分析同一篇论文
     return meta
@@ -209,14 +220,14 @@ def _fetch_arxiv_by_id(arxiv_id: str) -> dict | None:
         return None
 
 
-def _fetch_s2_by_id(paper_id: str) -> dict | None:
-    """按论文 ID（DOI 等）取元数据：Semantic Scholar 的精确取数接口，不受共享搜索限流池影响"""
-    url = f"https://api.semanticscholar.org/graph/v1/paper/{paper_id}"
+def _fetch_openalex_by_doi(doi: str) -> dict | None:
+    """按 DOI 取论文元数据：OpenAlex 认 DOI 当 ID，一次请求拿全（免费、无 key、不走搜索限流池）。
+    OpenAlex 的摘要字段是倒排索引，需 _rebuild_abstract 重建回文本"""
+    url = f"https://api.openalex.org/works/doi:{doi}"
     try:
         with httpx.Client(timeout=30) as client:
-            resp = client.get(url, params={"fields": "title,abstract,url"})
-            if resp.status_code == 429:      # 取数接口也有限流，遇到就放弃，走下一步兜底
-                log.warning("Semantic Scholar 按 ID 取数限流(429)：%s", paper_id)
+            resp = client.get(url)
+            if resp.status_code == 404:      # DOI 不存在，直接放弃，走下一步兜底
                 return None
             resp.raise_for_status()
             d = resp.json()
@@ -225,24 +236,28 @@ def _fetch_s2_by_id(paper_id: str) -> dict | None:
                 return None
             return {
                 "title": title,
-                "abstract": (d.get("abstract") or "").strip().replace("\n", " "),
-                "link": d.get("url") or "",
+                "abstract": _rebuild_abstract(d.get("abstract_inverted_index") or {}),
+                "link": d.get("doi") or d.get("id") or "",
             }
     except Exception as e:
-        log.warning("按 DOI 取元数据失败（%s）：%s", type(e).__name__, paper_id)
+        log.warning("按 DOI 取元数据失败（%s）：%s", type(e).__name__, doi)
         return None
 
 
 def _search_metadata_by_title(title: str) -> dict | None:
     """按标题补摘要：先精炼成英文关键词再搜（arXiv 是英文库，中文关键词命中率趋近 0）。
-    arXiv 优先搜；S2 只在 arXiv 没搜到时兜底，且限流就跳过不傻等（社区 429 处理共识）"""
+    arXiv 优先搜；OpenAlex 只在 arXiv 没搜到时兜底（免费无 key，限流宽松）"""
+    # 比赛合规（domestic）：arXiv/OpenAlex 全是境外 API，禁调，返回 None 走标题兜底
+    if RESEARCH_SOURCE != "international":
+        log.info("合规模式（RESEARCH_SOURCE=%s）不联网按标题补摘要", RESEARCH_SOURCE)
+        return None
     queries = _refine_queries(ResearchTask(id="T0", question=title, purpose="补全论文摘要"))
     for q in queries:
         found = _search_arxiv(q, 1)
         if found:
             return found[0]
     for q in queries:
-        found = _search_semantic_scholar(q, 1, retries=0)   # 限流直接放弃，不花时间重试
+        found = _search_openalex(q, 1)
         if found:
             return found[0]
     return None
@@ -383,43 +398,31 @@ def _search_arxiv(query: str, max_results: int, retries: int = 2) -> list[dict]:
             return []
 
 
-def _search_semantic_scholar(query: str, max_results: int, retries: int = 3) -> list[dict]:
-    """调 Semantic Scholar API 搜论文，返回 [{title, abstract, link}]。免费接口，无需 key。
-    429 限流时指数退避重试（默认最多 3 次；补摘要场景可传 0 表示限流即放弃），仍失败才返回空列表"""
-    url = "https://api.semanticscholar.org/graph/v1/paper/search"
-    params = {
-        "query": query,
-        "fields": "title,abstract,url",
-        "limit": max_results,
-    }
+def _search_openalex(query: str, max_results: int, retries: int = 1) -> list[dict]:
+    """用 OpenAlex 搜论文（免费、无 key、限流宽松，社区替代 Semantic Scholar 的主流源），
+    返回 [{title, abstract, link}]。摘要字段是倒排索引，用 _rebuild_abstract 重建回文本；
+    失败时简单退避重试一次，仍失败返回空列表，不拖垮主流程"""
+    url = "https://api.openalex.org/works"
+    params = {"search": query, "per-page": max_results}
     for attempt in range(retries + 1):
         try:
             with httpx.Client(timeout=30) as client:
                 resp = client.get(url, params=params)
-                if resp.status_code == 429:
-                    # 免费接口限流（请求太多）：等 2^attempt 秒 + 随机抖动再试，错峰避开限流池
-                    if attempt < retries:
-                        wait = 2 ** attempt + random.uniform(0, 1)
-                        log.warning("Semantic Scholar 限流(429)，%.1f秒后重试（第%d次）：%s", wait, attempt + 1, query)
-                        time.sleep(wait)
-                        continue
-                    log.warning("Semantic Scholar 限流(429)重试%d次仍失败：%s", retries, query)
-                    return []
                 resp.raise_for_status()
                 data = resp.json()
                 break
         except Exception as e:
             if attempt < retries:
-                # 其他网络/服务端错误也退避重试，临时故障（5xx/断网）能扛过去
+                # 退避重试：等 2^attempt 秒 + 随机抖动，错峰别撞限流
                 wait = 2 ** attempt + random.uniform(0, 1)
-                log.warning("Semantic Scholar 搜索失败（%s），%.1f秒后重试（第%d次）：%s", type(e).__name__, wait, attempt + 1, query)
+                log.warning("OpenAlex 搜索失败（%s），%.1f秒后重试（第%d次）：%s", type(e).__name__, wait, attempt + 1, query)
                 time.sleep(wait)
                 continue
-            log.warning("Semantic Scholar 搜索失败（%s）：%s", type(e).__name__, query)
+            log.warning("OpenAlex 搜索失败（%s）：%s", type(e).__name__, query)
             return []
 
     out = []
-    for p in data.get("data", []):
+    for p in data.get("results", []):
         if not isinstance(p, dict):
             continue
         title = (p.get("title") or "").strip()
@@ -427,14 +430,28 @@ def _search_semantic_scholar(query: str, max_results: int, retries: int = 3) -> 
             continue
         out.append({
             "title": title,
-            "abstract": (p.get("abstract") or "").strip().replace("\n", " "),
-            "link": p.get("url") or "",
+            "abstract": _rebuild_abstract(p.get("abstract_inverted_index") or {}),
+            "link": p.get("doi") or p.get("id") or "",   # 优先给 DOI 链接，没有就用 OpenAlex 的 ID 链接
         })
     return out
 
 
+def _rebuild_abstract(inverted: dict) -> str:
+    """OpenAlex 的摘要字段 abstract_inverted_index 是 {词: [出现位置...]} 的倒排索引，
+    按位置排序拼回正常文本；没有摘要返回空串"""
+    if not inverted:
+        return ""
+    # 展开成 (位置, 词) 再按位置排序，就还原出原文顺序
+    words = []
+    for word, positions in inverted.items():
+        for pos in positions:
+            words.append((pos, word))
+    words.sort()
+    return " ".join(w for _, w in words)
+
+
 def _dedup_papers(papers: list[dict]) -> list[dict]:
-    """按标题去重：arXiv 和 Semantic Scholar 可能返回同一篇论文，只留第一次出现的"""
+    """按标题去重：arXiv 和 OpenAlex 可能返回同一篇论文，只留第一次出现的"""
     seen: set[str] = set()
     out: list[dict] = []
     for p in papers:

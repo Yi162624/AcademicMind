@@ -10,7 +10,7 @@
 
 研一新生/科研新手进入一个陌生学术领域时，面临三大困境：
 
-- **信息过载**：面对 arXiv、Semantic Scholar 等海量碎片化信息，不知道从哪里开始
+- **信息过载**：面对 arXiv、OpenAlex 等海量碎片化信息，不知道从哪里开始
 - **耗时巨大**：缺乏系统性方法，**平均需要 2-4 周**才能拼凑出领域全貌
 - **难以提炼**：即使读完几十篇论文，也难以找出"值得深入研究的方向"
 
@@ -37,7 +37,7 @@
 
 ### 2.1 前端交互设计
 
-**前端形态**：React（Vite）+ FastAPI API 网关（frontend/server.py），**对话式交互**——用户像聊天一样输入研究问题或论文链接，AI 以消息流形式返回大纲确认、相关性提示、报告复核和最终结果（已实现）。
+**前端形态**：React（Vite）+ FastAPI API 网关（frontend/server.py），**对话式交互**——用户像聊天一样输入研究问题或论文链接，AI 以消息流形式返回大纲确认、相关性提示、报告复核和最终结果（已实现）。项目根目录提供**一键启动脚本 app.py**（`python app.py`）：同时拉起后端（uvicorn:8000）与前端（vite:5173），自动检测端口占用（已跑则复用），Ctrl+C 一起停止，日志带 [后端]/[前端] 前缀区分。
 
 **模式切换**：页面**侧边栏**常驻模式按钮（🔍 调研模式 / 📄 论文模式），一键切换；**研究进行中锁定切换**（running 时禁用按钮，防止对话状态串扰）。
 
@@ -86,7 +86,7 @@ core/schemas.py  数据契约（ResearchTask 研究任务单 + Evidence 证据�
 core/logger.py   统一日志出口（控制台 + data/logs/app.log 文件）
 
 模型调用层：
-- 所有文本 Agent 通过统一 HTTP Client 调用 DeepSeek-V4-Pro API
+- 所有文本 Agent 通过统一 HTTP Client 调用 DeepSeek-V4-Flash API
 - 图片/图表理解通过独立 HTTP Client 调用 Qwen3-VL-Plus API
 - 本地不加载任何模型权重
 ```
@@ -169,7 +169,7 @@ core/logger.py   统一日志出口（控制台 + data/logs/app.log 文件）
 | :--- | :--- | :--- |
 | 用户输入 | 一个研究问题 | 1 篇或多篇论文（链接或 PDF） |
 | Planner 拆解 | 3 个子主题 + 每章图片需求 + **研究任务单**（要回答什么问题/为什么研究/要什么证据/服务哪章） | 多篇：分析维度（方法/实验/结果/局限/结论）+ 论文分组 + 研究任务单；单篇：无 |
-| Researcher 搜集 | 按研究任务单 Search→Filter→Extract：LLM 精炼搜索词后搜 arXiv/S2，提炼成结构化证据（findings 结论 + claims 可追溯论断 + sources 来源） | 多篇：按组读论文、提炼要点；单篇：由 skill 直接深读 |
+| Researcher 搜集 | 按研究任务单 Search→Filter→Extract：LLM 精炼搜索词后搜 arXiv/OpenAlex，提炼成结构化证据（findings 结论 + claims 可追溯论断 + sources 来源） | 多篇：按组读论文、提炼要点；单篇：由 skill 直接深读 |
 | 图片检索 | 有（视觉工作记忆：pHash 去重 + Qwen3-VL-Plus 理解 + BGE 描述向量混合检索 + VLM 图文匹配精排） | 有（PDF 提取图表页 → API 理解，规划中）**——注意：论文模式的图不作为报告配图，只用于"看懂图表内容"并转成文字证据（如从柱状图提取准确率数据），报告本身是纯文字** |
 | 报告形态 | 图文交错 HTML 报告 | 单篇：标准化精读报告（8 章，skill）；多篇：对比综述报告（5 Agent） |
 | Verifier 检查 | 事实/引用/图文一致性 | 多篇：分析忠实度/引用真实性（跳过图文一致性）；单篇：无（skill 直出） |
@@ -192,8 +192,8 @@ core/logger.py   统一日志出口（控制台 + data/logs/app.log 文件）
 **第 2 步：研究员并行搜集（Search → Filter → Extract）**
 - 3 个研究员分别负责一个研究任务（ResearchTask，planner 产出）
 - **搜索词精炼**：研究员先把任务问题交给 LLM 压成 1-2 条短英文关键词（arXiv 不认整句中文长问题），LLM 失败时本地兜底提取关键词
-- 文本来源：arXiv API、Semantic Scholar API（429 限流时指数退避重试 + 随机抖动错峰）
-- **摘要获取分层策略**：论文模式补摘要时——① 用户给的链接含 arXiv ID/DOI → 直接按 ID 走官方取数接口（arXiv `id_list` / S2 `paper/{id}`），不触发搜索限流；② 无 ID 的纯标题 → LLM 精炼成英文关键词再搜（arXiv 优先，S2 限流即放弃）；③ 结果按链接缓存（`_META_CACHE`），重复分析零成本（详见 Bug修复记录 #8，提速约 20 倍）
+- 文本来源：arXiv API、OpenAlex API（免费、无 key、限流宽松；原 Semantic Scholar 免费接口按 IP 限流极激进、实测频繁 429，已弃用替换，详见 Bug修复记录 #9）
+- **摘要获取分层策略**：论文模式补摘要时——① 用户给的链接含 arXiv ID/DOI → 直接按 ID 走官方取数接口（arXiv `id_list` / OpenAlex `works/doi:{id}`），不触发搜索限流；② 无 ID 的纯标题 → LLM 精炼成英文关键词再搜（arXiv 优先，OpenAlex 兜底）；③ 结果按链接缓存（`_META_CACHE`），重复分析零成本（详见 Bug修复记录 #8，提速约 20 倍）
 - **证据提炼（核心）**：搜到候选论文后，研究员让 LLM 提炼成结构化证据——findings（综合结论，回答任务问题）+ claims（可追溯论断，claim→evidence_text→source）+ sources（来源论文，系统分配 S 编号）；不是把摘要原样丢给 Writer
 - **文本去重（规划中）**：Researcher 返回的证据在写入共享状态前，先经过轻量 embedding 模型（BGE-small，~100MB，CPU 运行）计算语义相似度，自动合并高度重复的文本片段，避免 Writer 整合时的冗余引用；当前 BGE-small 已落地于论文相关性检查（见 2.3），证据去重待迭代
 - 图片素材：存入"视觉工作记忆"（ImageItem：图片 + 来源 + 描述 + 子主题 + pHash + 描述向量）
@@ -347,13 +347,13 @@ Planner 拆解维度与分组 → 用户确认 → N×Researcher 并行分析 �
 | :--- | :--- |
 | 多智能体框架 | LangGraph |
 | 前端界面 | React（Vite）+ 自定义 CSS，对话式交互；FastAPI API 网关（frontend/server.py） |
-| 意图分类 | DeepSeek-V4-Pro 轻量调用（simple 直接答 / research 走调研 / other 礼貌拒答） |
-| 数据源 | arXiv API + Semantic Scholar API（Researcher 先精炼搜索词再搜，429 限流指数退避重试） |
+| 意图分类 | DeepSeek-V4-Flash 轻量调用（simple 直接答 / research 走调研 / other 礼貌拒答） |
+| 数据源 | arXiv API + OpenAlex API（Researcher 先精炼搜索词再搜，OpenAlex 免费无 key、限流宽松） |
 | 向量记忆 | Milvus Lite（嵌入式向量数据库）|
 | 结构化存储 | SQLite（模式偏好、单篇精读历史、任务元数据、图片记忆 pHash 去重）|
 | PDF 解析 | Docling（IBM 开源，文本 + 表格 + 图片一体化解析）|
 | 输入兼容 | arXiv 链接 / PDF 文件 / 其他链接，统一转 PDF 解析（Docling）|
-| **大语言模型** | **DeepSeek-V4-Pro API（所有文本 Agent 共用）** |
+| **大语言模型** | **DeepSeek-V4-Flash API（所有文本 Agent 共用）** |
 | **视觉理解** | **Qwen3-VL-Plus API（图片/图表理解）** |
 | 文本去重（规划中） | BGE-small 轻量 embedding（文本语义去重，CPU 运行）|
 | 图片去重 | pHash 感知哈希（汉明距离≤5，SQLite 存储）|
@@ -368,6 +368,7 @@ Planner 拆解维度与分组 → 用户确认 → N×Researcher 并行分析 �
 
 ```
 AcademicMind/
+├── app.py             # 一键启动脚本：同时拉起后端(uvicorn:8000)和前端(vite:5173)，端口复用检测，Ctrl+C 一起停
 ├── main.py             # 系统入口：任务分流 + LangGraph 状态机编排
 ├── core/               # 核心基础设施（全项目共享，各模块都从这里 import）
 │   ├── __init__.py
@@ -407,7 +408,7 @@ AcademicMind/
 | 周次 | 核心任务 | 验收标准 |
 | :--- | :--- | :--- |
 | 第 1 周 | LangGraph 多 Agent 骨架 + main.py 编排 + SQLite/Milvus Lite 记忆模块 | 5 个 Agent 状态机跑通（含 Verifier 回退逻辑 + HUMAN_IN_LOOP），SQLite 配置读写正常，Milvus Lite 向量存储正常 |
-| 第 2 周 | 接入 arXiv API + Semantic Scholar API + DeepSeek API + Qwen-VL API | Researcher 能返回结构化检索结果，API 调用稳定，错误降级策略生效，成本估算准确 |
+| 第 2 周 | 接入 arXiv API + OpenAlex API + DeepSeek API + Qwen-VL API | Researcher 能返回结构化检索结果，API 调用稳定，错误降级策略生效，成本估算准确 |
 | 第 3 周 | PDF 解析方案落地（Docling）+ 论文精读 skill | 单篇论文能输出标准化 8 章精读报告，arXiv 链接可自动转 PDF 解析，图表页通过 API 理解 |
 | 第 4 周 | Milvus Lite 图文检索整合 + 行动建议 Agent + 单篇精读历史记录 | 研究员能返回图片并通过 API 理解，行动建议 Agent 能生成 3 个方向建议，单篇精读完成后可存入精读历史、按 PDF/链接搜索历史精读记录 |
 | 第 5 周 | 全流程联调 + 数据收集 | 完整闭环跑通，输出图文报告+建议+论文清单，有初步数据 |
@@ -449,16 +450,16 @@ AcademicMind/
 
 | 环节 | 模型 | 说明 |
 | :--- | :--- | :--- |
-| Planner / Advisor | DeepSeek-V4-Pro | 任务简单，成本低，推理能力强 |
-| Researcher | DeepSeek-V4-Pro | 检索总结与格式化 |
-| Writer / Verifier | DeepSeek-V4-Pro | 质量要求高，长文本生成与检查 |
+| Planner / Advisor | DeepSeek-V4-Flash | 任务简单，成本低，推理能力强 |
+| Researcher | DeepSeek-V4-Flash | 检索总结与格式化 |
+| Writer / Verifier | DeepSeek-V4-Flash | 质量要求高，长文本生成与检查 |
 | 视觉理解 | Qwen3-VL-Plus API | 图表/文档理解，性价比极高 |
 
 ### 10.2 生产/比赛阶段
 
 | 环节 | 模型 | 说明 |
 | :--- | :--- | :--- |
-| 所有文本 Agent | DeepSeek-V4-Pro API | 统一入口，通过 system prompt 区分角色 |
+| 所有文本 Agent | DeepSeek-V4-Flash API | 统一入口，通过 system prompt 区分角色 |
 | 图片/图表理解 | Qwen3-VL-Plus API | 学术论文图表、表格、公式识别 |
 | PDF 解析 | Docling（本地）| 解析全文文本、表格与图片，仅本地轻量模型 |
 
@@ -470,8 +471,8 @@ AcademicMind/
 | 论文模式（多篇对比，5篇）| ~20K-50K | 15-30 张 | ~¥0.5-2.5 |
 | 调研模式 | ~30K-80K | 10-20 张 | ~¥1-3 |
 
-> 以上按 2026-07 官方价估算（当前代码 llm_client._PRICE 沿用 DeepSeek-V4-Flash 单价：输入 1 元/输出 2 元，每百万 token、平峰、未命中缓存）；视觉模型以 Qwen3-VL-Plus 官方报价为准。DeepSeek-V4-Pro 实际单价可能更高，需按官方报价同步更新 llm_client._PRICE。
-> DeepSeek-V4-Pro 与 Qwen3-VL-Plus API 价格均处于行业低位，单次任务成本可控。开发阶段可设置每日/每月预算上限防止超额。
+> 以上按 2026-07 官方价估算（当前代码 llm_client._PRICE 沿用 DeepSeek-V4-Flash 单价：输入 1 元/输出 2 元，每百万 token、平峰、未命中缓存）；视觉模型以 Qwen3-VL-Plus 官方报价为准。实际单价以官方报价为准，需同步更新 llm_client._PRICE。
+> DeepSeek-V4-Flash 与 Qwen3-VL-Plus API 价格均处于行业低位，单次任务成本可控。开发阶段可设置每日/每月预算上限防止超额。
 
 **缓存策略**：Researcher 的检索结果和 PDF 解析结果本地缓存，避免重复调用 API 或重复解析。
 
@@ -483,11 +484,11 @@ AcademicMind/
 2. **纯 API 架构**：本地零模型负担，8GB 显存即可运行，比赛/部署不受硬件限制
 3. **统一 PDF 解析策略**：所有输入（arXiv 链接 / PDF / URL）统一转 PDF，Docling 一体化解析（文本 + 表格 + 图片）+ Qwen3-VL-Plus API 理解图表，兼顾速度与质量
 4. **SQLite + Milvus Lite 分层存储**：结构化数据与向量数据各司其职，本地部署零外部依赖（除 API 外）
-5. **统一模型 + 角色 Prompt**：所有 Agent 共用 DeepSeek-V4-Pro，通过 system prompt 区分角色，成本与复杂度最低
+5. **统一模型 + 角色 Prompt**：所有 Agent 共用 DeepSeek-V4-Flash，通过 system prompt 区分角色，成本与复杂度最低
 6. **图片素材三层防线**：pHash 去重 → 子主题/关键词 + BGE 描述向量混合检索 → Qwen3-VL-Plus 图文匹配精排，避免"图长得像但语义不符"的素材混入报告
 7. **证据信息流（可追溯）**：Planner 产出 ResearchTask 研究任务单驱动 Researcher，Researcher 提炼结构化证据（finding ≠ claim，claim 带 source_id + evidence_text），Writer 按证据写并在正文标 [E#n]，Verifier 沿 [E#n] → Evidence → Claim → Source 链核对，Advisor 基于任务+证据判断研究空白——各环节编号（T/E/S）由系统分配，杜绝"引用不存在的证据"与"信息过手即衰减"
 8. **意图分类三层分流**：对话输入先经 LLM 轻量分类——简单问题 AI 秒答、专业调研走 5 Agent、其他复杂非学术问题礼貌拒答并说明原因，避免"你好"也被当成调研任务跑几分钟
-9. **论文摘要按 ID 取数 + 缓存**：arXiv 链接按 ID `id_list` 精确拉取、DOI 走 S2 `paper/{id}`，不吃搜索接口共享限流池；无 ID 才英文精炼搜索（S2 限流即弃）；结果按链接缓存——补摘要从"13 秒空等 + 0 条"提速到"0.7 秒命中"（约 20 倍）
+9. **论文摘要按 ID 取数 + 缓存**：arXiv 链接按 ID `id_list` 精确拉取、DOI 走 OpenAlex `works/doi:{id}`，不触发搜索限流；无 ID 才英文精炼搜索（OpenAlex 兜底）；结果按链接缓存——补摘要从"13 秒空等 + 0 条"提速到"0.7 秒命中"（约 20 倍）
 
 ---
 

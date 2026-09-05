@@ -11,13 +11,15 @@
 # 关键点：run_task/resume_task 是同步阻塞的（搜论文/调 API 要几十秒），
 #         必须用 run_in_executor 扔到线程池跑，否则卡住整个事件循环，前端别的请求全排队。
 
+import io
 import os
+import re
 import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -142,14 +144,44 @@ async def write_config(req: ConfigReq):
 
 @app.post("/api/upload")
 async def upload_pdf(file: UploadFile = File(...)):
-    """上传 PDF：存到缓存目录 uploads/，返回本地路径（后端按本地 PDF 识别）"""
+    """上传 PDF：先校验是不是完整可读的 PDF（坏文件直接 400 拒绝），再存缓存目录 uploads/，返回本地路径。
+    文件名做安全化：把全角冒号/中文等特殊字符替换为下划线，避免 Docling 解析含特殊字符的路径失败"""
     up_dir = os.path.join(CACHE_DIR, "uploads")
     os.makedirs(up_dir, exist_ok=True)
-    path = os.path.join(up_dir, file.filename)
+    # 安全文件名：只替换全角标点/非法字符为 _（保留中文和字母数字，Docling 读路径只被特殊符号卡住），原始标题仍返回给前端显示用
+    safe_name = re.sub(r"[：:/*?\"<>|！!？?\s]+", "_", file.filename)
+    safe_name = safe_name.strip("_") or "upload.pdf"
+    path = os.path.join(up_dir, safe_name)
+    data = await file.read()
+    # 先验文件好坏：下载中断/假 PDF 直接拒绝，别等 Docling 白跑几十秒才发现失败
+    _validate_pdf(data, file.filename)
     with open(path, "wb") as f:
-        f.write(await file.read())
+        f.write(data)
     title = os.path.splitext(file.filename)[0]
     return {"title": title, "link": path}
+
+
+def _validate_pdf(data: bytes, filename: str) -> None:
+    """校验上传文件是不是完整可读的 PDF。
+    三个硬指标：文件头 %PDF-、文件尾 %%EOF、pypdf 能打开且页数≥1。
+    不满足任何一个就抛 400，提示用户文件损坏或下载不完整"""
+    if data[:5] != b"%PDF-":
+        raise HTTPException(400, f"「{filename}」不是有效的 PDF 文件，请确认文件格式")
+    if b"%%EOF" not in data[-2048:]:
+        raise HTTPException(400, f"「{filename}」PDF 文件不完整（下载可能中断），请重新下载后再上传")
+    # pypdf / PyPDF2 都行：能打开且至少 1 页才算真正可读的 PDF
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        from PyPDF2 import PdfReader
+    try:
+        reader = PdfReader(io.BytesIO(data))
+        if len(reader.pages) < 1:
+            raise HTTPException(400, f"「{filename}」PDF 内容为空，请检查文件")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(400, f"「{filename}」PDF 文件损坏，无法读取（{type(e).__name__}），请重新下载后再上传") from e
 
 
 @app.get("/api/health")

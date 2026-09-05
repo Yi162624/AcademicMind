@@ -1,7 +1,7 @@
 # 前端入口（Streamlit · 对话式交互）
 # 作用：以"用户和 AI 对话"的形式驱动后端多 Agent 流程。
 #       用户用聊天框提需求，AI 以消息形式返回大纲确认/相关性提示/报告复核/最终结果。
-# 运行：streamlit run frontend/app.py
+# 运行：streamlit run frontend/streamlit_app.py
 # 关键设计：
 #   - 后端 run_task/resume_task 是阻塞的（搜论文/调 API 要几十秒），放子线程跑，避免卡死 UI
 #   - 子线程不能直接写 session_state（会丢 ScriptRunContext），改成写共享队列 mailbox，
@@ -15,9 +15,8 @@ import threading
 import uuid
 
 import streamlit as st
-import streamlit.components.v1 as components
 
-# 把项目根目录加到模块搜索路径：app.py 在 frontend/ 下，不 import 后端就找不到 main/core/agent
+# 把项目根目录加到模块搜索路径：streamlit_app.py 在 frontend/ 下，不 import 后端就找不到 main/core/agent
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from core.schemas import FinalResult, MODE_PAPER, MODE_SURVEY, PaperSource  # noqa: E402
@@ -149,14 +148,14 @@ def _render_suggestion(sug):
 
 
 def _render_result(res: FinalResult):
-    """把最终结果渲染成 AI 消息：警告 + 报告(HTML) / 建议 / 精读报告(Markdown)"""
+    """把最终结果渲染成 AI 消息：警告 + 报告(Markdown) / 建议 / 精读报告(Markdown)"""
     for w in res.warning_flags:
         st.warning(f"⚠️ {w}")
-    if res.report:  # 调研/对比报告：Writer 生成的是完整 HTML，用 components 还原排版
+    if res.report:  # 调研/对比报告：Writer 生成的是 Markdown，直接渲染
         st.markdown("### 📄 研究报告")
-        components.html(res.report.html, height=700, scrolling=True)
-        st.download_button("⬇️ 下载报告 HTML", res.report.html,
-                           file_name="report.html", mime="text/html")
+        st.markdown(res.report.markdown)
+        st.download_button("⬇️ 下载报告 Markdown", res.report.markdown,
+                           file_name="report.md", mime="text/markdown")
     if res.suggestion:
         _render_suggestion(res.suggestion)
     if res.deep_read:  # 单篇精读报告：主产物是 Markdown

@@ -20,11 +20,11 @@ _PAPER_SYSTEM = "你是论文分析顾问。基于对比分析报告给出下一
 def run_advisor(flow: FlowState) -> Suggestion:
     """建议 Agent 入口：按模式生成建议。失败时返回空建议，不卡主流程"""
     report = flow.report
-    html = report.html if report else "（报告缺失）"
+    markdown = report.markdown if report else "（报告缺失）"
 
     if flow.mode == MODE_PAPER:
-        return _advise_paper(flow, html)
-    return _advise_survey(flow, html)
+        return _advise_paper(flow, markdown)
+    return _advise_survey(flow, markdown)
 
 
 def _serialize_context(flow: FlowState) -> str:
@@ -43,15 +43,15 @@ def _serialize_context(flow: FlowState) -> str:
     return "\n".join(lines) if lines else "（无研究任务）"
 
 
-def _advise_survey(flow: FlowState, html: str) -> Suggestion:
-    """调研模式：生成 3 个方向 + 5 篇论文 + 行动清单（参考研究任务和证据概况，不只吃 HTML）"""
+def _advise_survey(flow: FlowState, markdown: str) -> Suggestion:
+    """调研模式：生成 3 个方向 + 5 篇论文 + 行动清单（参考研究任务和证据概况，不只吃报告正文）"""
     prompt = f"""调研问题：{flow.question}
 
 研究任务与证据概况（据此判断哪些任务研究充分、哪些证据不足、哪些是研究空白）：
 {_serialize_context(flow)}
 
-调研报告正文（HTML）：
-{html}
+调研报告正文（Markdown）：
+{markdown}
 
 请输出如下 JSON（严格按字段）：
 {{
@@ -76,13 +76,13 @@ def _advise_survey(flow: FlowState, html: str) -> Suggestion:
     return Suggestion()
 
 
-def _advise_paper(flow: FlowState, html: str) -> Suggestion:
+def _advise_paper(flow: FlowState, markdown: str) -> Suggestion:
     """论文模式：生成论文 + 行动清单，directions 按文档规定留空（参考研究任务和证据概况）"""
     prompt = f"""研究任务与证据概况（据此判断哪些对比维度证据充足、哪些不足）：
 {_serialize_context(flow)}
 
-论文对比分析报告正文（HTML）：
-{html}
+论文对比分析报告正文（Markdown）：
+{markdown}
 
 请输出如下 JSON（严格按字段）：
 {{

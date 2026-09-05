@@ -81,20 +81,32 @@ body {
 .empty p { font-size: 14px; max-width: 420px; line-height: 1.7; }
 
 /* 消息气泡 */
-.msg { display: flex; margin-bottom: 18px; }
+.msg { display: flex; margin-bottom: 20px; align-items: flex-start; }
 .msg.user { justify-content: flex-end; }
-.avatar {
-  width: 34px; height: 34px; border-radius: 50%; flex-shrink: 0;
-  display: flex; align-items: center; justify-content: center; font-size: 16px;
+/* 微信式时间分隔：居中一行小灰字，挂在消息流里不占太多高度 */
+.time-divider {
+  text-align: center;
+  color: #9ca3af;
+  font-size: 12px;
+  margin: 12px 0;
+  user-select: none;
 }
-.msg.ai .avatar { background: linear-gradient(135deg, var(--brand), #8b5cf6); color: #fff; margin-right: 10px; }
-.msg.user .avatar { background: linear-gradient(135deg, #f9a8d4, #f472b6); color: #fff; margin-left: 10px; order: 2; }
+.avatar {
+  width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center; font-size: 15px;
+}
+/* AI 头像：品牌蓝纯色圆（参考 ChatGPT/Claude 风格，不用花哨渐变） */
+.msg.ai .avatar { background: var(--brand); color: #fff; margin-right: 10px; }
+/* 用户头像：深灰纯色圆（去掉原来的粉红渐变，更符合学术工具调性） */
+.msg.user .avatar { background: #4b5563; color: #fff; margin-left: 10px; order: 2; }
 .bubble {
-  max-width: 78%; padding: 12px 16px; border-radius: 14px;
+  max-width: 78%; padding: 12px 16px; border-radius: 16px;
   font-size: 14px; line-height: 1.7; word-break: break-word;
 }
-.msg.ai .bubble { background: var(--bubble-ai); border: 1px solid var(--border); border-top-left-radius: 4px; }
-.msg.user .bubble { background: var(--bubble-user); color: #fff; border-top-right-radius: 4px; }
+/* AI 气泡：浅灰底，统一圆角，和白底对话区有区分度 */
+.msg.ai .bubble { background: #f3f4f6; color: var(--text); }
+/* 用户气泡：品牌蓝底白字，统一圆角 */
+.msg.user .bubble { background: var(--brand); color: #fff; }
 .bubble h3 { margin: 4px 0 10px; font-size: 15px; }
 .bubble p { margin: 6px 0; }
 .bubble ul, .bubble ol { margin: 6px 0; padding-left: 20px; }
@@ -105,10 +117,18 @@ body {
 .bubble code { font-family: Consolas, monospace; font-size: 13px; }
 .bubble a { color: var(--brand); }
 
-/* 报告 iframe */
-.report-frame {
-  width: 100%; height: 560px; border: 1px solid var(--border);
-  border-radius: 10px; background: #fff;
+/* Markdown 报告（调研/对比报告 + 精读报告统一用它渲染） */
+.md-report { font-size: 14px; line-height: 1.75; }
+.md-report h1 { font-size: 20px; margin: 14px 0 8px; }
+.md-report h2 { font-size: 17px; margin: 14px 0 8px; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+.md-report h3, .md-report h4 { font-size: 15px; margin: 12px 0 6px; }
+.md-report p { margin: 8px 0; }
+.md-report ul, .md-report ol { margin: 8px 0; padding-left: 22px; }
+.md-report li { margin: 4px 0; }
+.md-report a { color: var(--brand); }
+.md-report blockquote {
+  margin: 10px 0; padding: 6px 12px; border-left: 3px solid var(--brand);
+  background: #f0f4ff; border-radius: 4px; color: var(--text-dim);
 }
 
 /* 确认卡片（HIL） */
@@ -141,26 +161,35 @@ body {
 /* ── 输入区 ── */
 .input-area { padding: 14px 24px 18px; background: #fff; border-top: 1px solid var(--border); }
 .input-inner { max-width: 860px; margin: 0 auto; }
-.paper-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+/* 输入框整体容器：附件标签 + 按钮/文本框都在这个带圆角边框的盒子里 */
+.input-row {
+  border: 1px solid var(--border); border-radius: 14px;
+  background: #fff; padding: 8px; display: flex; flex-direction: column;
+  transition: border-color .15s;
+}
+.input-row:focus-within { border-color: var(--brand); }
+/* 附件标签区：在输入框内部顶部，不再单独占一行 */
+.paper-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 6px 8px; }
 .chip {
   display: inline-flex; align-items: center; gap: 6px;
   background: #eef1fe; color: var(--brand-dark); font-size: 12px;
   padding: 4px 8px; border-radius: 14px;
 }
 .chip button { border: none; background: none; cursor: pointer; color: inherit; font-size: 13px; padding: 0; }
-.input-row { display: flex; gap: 10px; align-items: flex-end; }
-.input-row textarea {
-  flex: 1; resize: none; padding: 11px 14px; font-size: 14px; font-family: inherit;
-  border: 1px solid var(--border); border-radius: 12px; line-height: 1.5; max-height: 120px;
+/* 按钮 + textarea 同一行 */
+.input-controls { display: flex; gap: 8px; align-items: flex-end; }
+.input-controls textarea {
+  flex: 1; resize: none; padding: 8px 10px; font-size: 14px; font-family: inherit;
+  border: none; background: transparent; line-height: 1.5; max-height: 120px;
 }
-.input-row textarea:focus { outline: none; border-color: var(--brand); }
+.input-controls textarea:focus { outline: none; }
 .icon-btn {
-  width: 42px; height: 42px; border-radius: 12px; border: 1px solid var(--border);
-  background: #fff; cursor: pointer; font-size: 17px; flex-shrink: 0;
+  width: 36px; height: 36px; border-radius: 10px; border: none;
+  background: transparent; cursor: pointer; font-size: 17px; flex-shrink: 0;
   display: flex; align-items: center; justify-content: center; transition: all .15s;
 }
-.icon-btn:hover:not(:disabled) { border-color: var(--brand); }
-.icon-btn.send { background: var(--brand); border-color: var(--brand); color: #fff; }
+.icon-btn:hover:not(:disabled) { background: #f3f4f6; }
+.icon-btn.send { background: var(--brand); color: #fff; }
 .icon-btn.send:hover:not(:disabled) { background: var(--brand-dark); }
 .icon-btn:disabled { opacity: .45; cursor: not-allowed; }
 .input-hint { font-size: 12px; color: var(--text-dim); margin-top: 6px; }

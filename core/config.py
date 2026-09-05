@@ -34,7 +34,7 @@ def _read(name: str, default: str = "") -> str:
 DEEPSEEK = ModelConfig(
     api_key=_read("DEEPSEEK_API_KEY"),                              # API 密钥，从 .env 读，没配也能启动
     base_url=_read("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),  # 接口地址，默认 DeepSeek 官方地址
-    model=_read("DEEPSEEK_MODEL", "deepseek-v4-pro"),            # 模型名，默认官方主力模型 V4-Pro
+    model=_read("DEEPSEEK_MODEL", "deepseek-v4-flash"),            # 模型名，默认快速模型 V4-Flash
     max_tokens=int(_read("DEEPSEEK_MAX_TOKENS", "8192")),           # 一次最多生成多少 token，写报告够用
     max_context=int(_read("DEEPSEEK_MAX_CONTEXT", "64000")),        # 上下文窗口（输入+输出合计），预留防超长
     timeout=float(_read("DEEPSEEK_TIMEOUT", "120")),                # 请求超时秒数，防网络卡死
@@ -56,6 +56,18 @@ if not DEEPSEEK.api_key:
     log.warning("DEEPSEEK_API_KEY 未配置：文本 Agent 调用会失败，请复制 .env.example 为 .env 并填写")
 if not QWEN_VL.api_key:
     log.warning("QWEN_VL_API_KEY 未配置：图片理解功能会失败，请复制 .env.example 为 .env 并填写")
+
+# ═══════ 论文检索数据源开关 ═══════
+# 用途：比赛合规开关。规则禁调境外 API（arXiv/OpenAlex 全在境外），
+# 默认 domestic（境内模式）——论文搜索/PDF 下载全短路；Docling 的布局/表格模型源
+# huggingface.co 也是境外，统一指到国内镜像 hf-mirror.com（本地有缓存时直接用缓存、不联网）。
+# 只走"本地上传 PDF + 国内大模型"，全程零境外请求；原有境外逻辑原样保留但不会执行；
+# 比赛后想恢复境外检索，把 .env 的 RESEARCH_SOURCE 改成 international 即可
+RESEARCH_SOURCE = _read("RESEARCH_SOURCE", "domestic")   # domestic=比赛版(禁境外) | international=完整版(可调境外)
+if RESEARCH_SOURCE != "international":
+    # Docling/transformers 默认从 huggingface.co 拉模型（境外），比赛版指到国内镜像 hf-mirror.com；
+    # 本地已缓存模型则 huggingface_hub 直接命中缓存，不发任何网络请求
+    os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 # ═══════ 预算与路径 ═══════
 DAILY_BUDGET = float(_read("DAILY_BUDGET", "20"))       # 每日预算上限（元）
