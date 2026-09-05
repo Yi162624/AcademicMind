@@ -69,6 +69,21 @@ if RESEARCH_SOURCE != "international":
     # 本地已缓存模型则 huggingface_hub 直接命中缓存，不发任何网络请求
     os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
+# ═══════ 境内联网搜索：DashScope Qwen（比赛合规版调研模式专用）═══════
+# 用途：比赛规则"数据不出境、禁止调用境外 API"，arXiv/OpenAlex 全是境外 API 被禁，
+#       调研模式就搜不到真实论文。这里换走阿里云百炼（DashScope，境内节点）Qwen 的
+#       enable_search 联网搜索：请求发国内、由阿里自己抓取网页，返回真实论文标题+链接，
+#       数据不出境、也不靠模型记忆瞎编。international 模式仍走 arXiv/OpenAlex（保留原逻辑）。
+# key 默认复用上面 QWEN_VL 的百炼 key（同一账号），想单独区分就在 .env 覆盖 QWEN_SEARCH_API_KEY
+QWEN_SEARCH = ModelConfig(
+    api_key=_read("QWEN_SEARCH_API_KEY", QWEN_VL.api_key),           # 境内联网搜索 key，默认复用百炼 key
+    base_url="https://dashscope.aliyuncs.com",                        # 阿里云百炼原生网关（境内）
+    model=_read("QWEN_SEARCH_MODEL", "qwen-plus"),                   # 支持 enable_search 的文本模型
+    max_tokens=int(_read("QWEN_SEARCH_MAX_TOKENS", "4096")),         # 联网检索+整理结果，一次够用
+    max_context=32768,                                                # 预留上下文窗口
+    timeout=float(_read("QWEN_SEARCH_TIMEOUT", "90")),               # 联网检索要等抓网页，超时给宽点
+)
+
 # ═══════ 预算与路径 ═══════
 DAILY_BUDGET = float(_read("DAILY_BUDGET", "20"))       # 每日预算上限（元）
 MONTHLY_BUDGET = float(_read("MONTHLY_BUDGET", "200"))  # 每月预算上限（元）

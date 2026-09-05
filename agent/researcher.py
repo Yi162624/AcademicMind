@@ -17,9 +17,9 @@ import time
 
 import httpx
 
-from core.config import RESEARCH_SOURCE  # noqa: E402   # 比赛合规开关：domestic 时禁调境外论文 API
+from core.config import RESEARCH_SOURCE  # noqa: E402   # 比赛合规开关：domestic 时禁调境外论文 API，改走境内联网搜索
 from core.json_utils import parse_json
-from core.llm_client import chat
+from core.llm_client import chat, search
 from core.logger import get_logger
 from core.schemas import Claim, Evidence, FlowState, MODE_PAPER, ResearchTask, Source
 
@@ -31,6 +31,9 @@ _OPENALEX_NUM = 5
 
 # 研究员提炼证据的角色设定，逼 LLM 只输出结构化 JSON
 _SYSTEM = "你是学术研究员。从给定论文摘要中提炼能回答研究问题的证据，只输出 JSON，不要加任何解释或 Markdown 代码块。"
+
+# 合规版调研检索（domestic）的角色设定：境内联网搜索专用，只输出真实检索到的论文 JSON
+_SYSTEM_SEARCH = "你是学术论文检索助手。你会先联网检索真实论文再整理，只输出 JSON，不要任何解释或 Markdown 代码块。"
 
 
 def run_researcher(flow: FlowState) -> list[Evidence]:
@@ -82,19 +85,66 @@ def _research_task(task: ResearchTask, flow: FlowState) -> Evidence:
 
 
 def _search_task(task: ResearchTask) -> list[dict]:
-    """调研模式搜索：先把研究问题精炼成 1-2 条短搜索词（LLM），再逐条去 arXiv+OpenAlex 搜。
+    """调研模式搜索：先把研究问题精炼成 1-2 条短搜索词（LLM），再按合规开关选数据源：
+    - domestic（比赛合规版）：arXiv/OpenAlex 是境外 API 被禁，改走境内联网搜索（DashScope Qwen enable_search）
+    - international（完整版）：精炼后去 arXiv+OpenAlex 搜（保留原逻辑，比赛后可一键复原）
     用短关键词而非整句中文问句，arXiv 不会报错、OpenAlex 命中率也更高；合并去重后返回候选"""
-    # 比赛合规（domestic）：arXiv/OpenAlex 全是境外 API，比赛规则禁调，直接不搜返回空；
-    # 演示走论文模式（本地上传 PDF），调研搜索等比赛后 RESEARCH_SOURCE=international 再恢复
-    if RESEARCH_SOURCE != "international":
-        log.info("合规模式（RESEARCH_SOURCE=%s）不联网搜索论文，跳过任务「%s」", RESEARCH_SOURCE, task.id)
-        return []
     queries = _refine_queries(task)                     # 精炼搜索词（失败降级为原始问题）
+    if RESEARCH_SOURCE != "international":
+        return _search_domestic(queries)                # 合规版：境内联网搜索拿真实论文
     papers: list[dict] = []
     for q in queries:
         papers += _search_arxiv(q, _ARXIV_NUM)
         papers += _search_openalex(q, _OPENALEX_NUM)
     return _dedup_papers(papers)
+
+
+def _search_domestic(queries: list[str]) -> list[dict]:
+    """调研模式境内检索（比赛合规版）：把搜索词发给阿里云百炼 Qwen 的联网搜索，
+    只收它"真实检索到"的论文（标题+真实链接+摘要），不靠模型记忆编造；
+    返回和境外搜索一样的统一格式 [{title, abstract, link}]，下游证据提炼不用区分来源"""
+    if not queries:
+        return []
+    prompt = f"""请逐个用以下搜索词联网检索学术论文（可命中 arXiv、OpenAlex、期刊官网等）：
+搜索词：
+{chr(10).join(f"- {q}" for q in queries)}
+
+基于真实检索结果，只输出如下 JSON（每个搜索词挑最相关的前 3 篇，总共最多 8 篇）：
+{{"papers": [{{"title": "论文真实标题", "link": "论文真实网址", "abstract": "论文摘要（60-120字）"}}]}}
+
+要求：
+1. 只能写检索结果里真实存在的论文，禁止凭记忆编造标题或链接
+2. 每篇都给真实可访问的链接（arXiv / DOI / 期刊页均可）
+3. 宁缺毋滥，搜不到就输出 {{"papers": []}}"""
+
+    try:
+        resp = search(system=_SYSTEM_SEARCH, user=prompt)
+        papers = _papers_from_json(parse_json(resp.text))
+        log.info("境内联网检索到 %d 篇候选论文", len(papers))
+        return papers
+    except Exception as e:
+        log.warning("境内联网检索失败（%s），本次任务返回空候选", type(e).__name__)
+        return []
+
+
+def _papers_from_json(data) -> list[dict]:
+    """把境内联网搜索返回的 {"papers":[{title, link, abstract}]} 清洗成统一候选格式，
+    缺标题或缺链接的脏条目直接丢（没链接的证据没法溯源，下游 Writer 不允许）"""
+    if not isinstance(data, dict):
+        return []
+    raw = data.get("papers")
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    for p in raw:
+        if not isinstance(p, dict):
+            continue
+        title = str(p.get("title") or "").strip()
+        link = str(p.get("link") or "").strip()
+        if not title or not link:
+            continue
+        out.append({"title": title, "abstract": str(p.get("abstract") or "").strip(), "link": link})
+    return out
 
 
 def _refine_queries(task: ResearchTask) -> list[str]:

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from .config import DEEPSEEK, QWEN_VL
+from .config import DEEPSEEK, QWEN_SEARCH, QWEN_VL
 from .logger import get_logger
 
 log = get_logger("llm_client")  # 本模块日志器，排错时看 API 调用情况用
@@ -18,6 +18,7 @@ RETRY_TIMES = 2  # 网络失败最多重试次数
 _PRICE = {
     "deepseek": (1.0, 2.0),
     "qwen_vl": (2.0, 5.0),
+    "qwen": (2.0, 5.0),
 }
 
 # ── 会话级消耗累加器 ──
@@ -97,6 +98,39 @@ def vision(image: str, prompt: str) -> LLMResponse:
     data = _post(url, payload, QWEN_VL.api_key, QWEN_VL.timeout)
     resp = _to_response(data, "qwen_vl")
     _accumulate(resp)                                  # 累加到会话消耗（写任务日志用）
+    return resp
+
+
+def search(system: str, user: str, max_tokens: int | None = None) -> LLMResponse:
+    """境内联网搜索：调阿里云百炼 Qwen 的 enable_search（先联网检索再回答）。
+    比赛合规版（domestic）调研模式用它搜真实论文——arXiv/OpenAlex 是境外 API 被禁，
+    这里是境内的替代源：请求发国内节点、由阿里自己抓网页，返回结果是检索来的不是模型编的"""
+    log.info("境内联网搜索调用开始：model=%s enable_search=true", QWEN_SEARCH.model)
+    url = f"{QWEN_SEARCH.base_url.rstrip('/')}/api/v1/services/aigc/text-generation/generation"   # 百炼原生网关
+    payload = {
+        "model": QWEN_SEARCH.model,
+        "input": {"messages": [
+            {"role": "system", "content": system},     # 角色设定
+            {"role": "user", "content": user},         # 检索指令 + 要整理的论文
+        ]},
+        "parameters": {
+            "enable_search": True,                     # 打开联网检索：先搜真实网页再回答
+            "result_format": "message",                # 返回结构用 message 格式，好取正文
+            "max_tokens": max_tokens or QWEN_SEARCH.max_tokens,
+        },
+    }
+    data = _post(url, payload, QWEN_SEARCH.api_key, QWEN_SEARCH.timeout)
+    text = data["output"]["choices"][0]["message"]["content"]     # 模型生成的正文
+    usage = data.get("usage", {})                                 # token 用量
+    input_tokens = usage.get("input_tokens", 0)
+    output_tokens = usage.get("output_tokens", 0)
+    resp = LLMResponse(
+        text=text,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cost=estimate_cost(input_tokens, output_tokens, "qwen"),
+    )
+    _accumulate(resp)                                 # 累加到会话消耗（写任务日志用）
     return resp
 
 
